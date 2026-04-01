@@ -26,22 +26,35 @@ const ZELLO_BOT_PASS = process.env.ZELLO_BOT_PASS || process.env.ZELLO_ADMIN_PAS
 const ZELLO_CHANNELS = (process.env.ZELLO_BRIDGE_CHANNELS || "").split(",").filter(Boolean);
 const ZELLO_WS_URL = `wss://zellowork.io/ws/${ZELLO_NETWORK}`;
 
+// ─── OpenClaw Gateway (for "openclaw" backend) ────────────────────
 const OPENCLAW_GATEWAY = process.env.OPENCLAW_GATEWAY || "http://127.0.0.1:18789";
 const OPENCLAW_TOKEN = process.env.GATEWAY_TOKEN;
 const OPENCLAW_AGENT = process.env.OPENCLAW_AGENT || "haldeman";
 
-// LLM backend: "openclaw" | "local" | "local+perplexity"
+// ─── LLM Backend ──────────────────────────────────────────────────
+// "openclaw"          → route through OpenClaw gateway (uses agent's configured model)
+// "local"             → direct local LLM call (vLLM/Ollama)
+// "local+perplexity"  → Perplexity for real-time data, local LLM for voice formatting
 const LLM_BACKEND = process.env.LLM_BACKEND || "local+perplexity";
+
+// ─── Local LLM (for "local" and "local+perplexity" backends) ──────
 const LOCAL_LLM_URL = process.env.LOCAL_LLM_URL || "http://127.0.0.1:8888/v1/chat/completions";
 const LOCAL_LLM_API_KEY = process.env.LOCAL_LLM_API_KEY || process.env.LOCAL_VLLM_API_KEY || "vllm-local";
 const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "Qwen/Qwen3-Coder-Next-FP8";
+const LOCAL_LLM_MAX_TOKENS = parseInt(process.env.LOCAL_LLM_MAX_TOKENS || "512", 10);
+const LOCAL_LLM_TEMPERATURE = parseFloat(process.env.LOCAL_LLM_TEMPERATURE || "0.7");
 
-// Perplexity for real-time data grounding
+// ─── Perplexity (for "local+perplexity" backend) ──────────────────
 const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
-const PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions";
+const PERPLEXITY_URL = process.env.PERPLEXITY_URL || "https://api.perplexity.ai/chat/completions";
 const PERPLEXITY_MODEL = process.env.PERPLEXITY_MODEL || "sonar";
-const LOCAL_LLM_SYSTEM_PROMPT = process.env.LOCAL_LLM_SYSTEM_PROMPT ||
-  "You are HALDEMAN, a concise voice assistant on a Zello PTT radio channel. Keep responses short and spoken-word friendly. No markdown, no bullet points, no special characters. Respond as if speaking on a radio.";
+
+// ─── Agent Persona ────────────────────────────────────────────────
+const AGENT_NAME = process.env.AGENT_NAME || "HALDEMAN";
+const AGENT_SYSTEM_PROMPT = process.env.AGENT_SYSTEM_PROMPT ||
+  `You are ${AGENT_NAME}, a concise voice assistant on a Zello PTT radio channel. Keep responses short and spoken-word friendly. No markdown, no bullet points, no special characters. Respond as if speaking on a radio.`;
+const AGENT_SEARCH_PROMPT = process.env.AGENT_SEARCH_PROMPT ||
+  `You are ${AGENT_NAME}, a concise voice assistant on a Zello PTT radio channel. You have been given real-time search data. Summarize it in natural spoken language. No markdown, no bullet points, no special characters, no asterisks. Keep it brief and radio-friendly.`;
 
 // STT config
 const STT_METHOD = process.env.STT_METHOD || "faster-whisper"; // "faster-whisper" or "zello-transcription"
@@ -476,7 +489,8 @@ async function callLocalLLM(messages) {
     body: JSON.stringify({
       model: LOCAL_LLM_MODEL,
       messages,
-      max_tokens: 512,
+      max_tokens: LOCAL_LLM_MAX_TOKENS,
+      temperature: LOCAL_LLM_TEMPERATURE,
     }),
   });
 
@@ -501,9 +515,7 @@ async function sendToLocalWithPerplexity(text, zelloUser, zelloChannel) {
   const messages = [
     {
       role: "system",
-      content: context
-        ? "You are HALDEMAN, a concise voice assistant on a Zello PTT radio channel. You have been given real-time search data. Summarize it in natural spoken language. No markdown, no bullet points, no special characters, no asterisks. Keep it brief and radio-friendly."
-        : LOCAL_LLM_SYSTEM_PROMPT,
+      content: context ? AGENT_SEARCH_PROMPT : AGENT_SYSTEM_PROMPT,
     },
     {
       role: "user",
@@ -520,7 +532,7 @@ async function sendToLocalWithPerplexity(text, zelloUser, zelloChannel) {
 
 async function sendToLocalLLM(text) {
   return await callLocalLLM([
-    { role: "system", content: LOCAL_LLM_SYSTEM_PROMPT },
+    { role: "system", content: AGENT_SYSTEM_PROMPT },
     { role: "user", content: text },
   ]);
 }
@@ -756,9 +768,10 @@ console.error("  PinchPTT — Voice Bridge for OpenClaw");
 console.error(`  Network:  ${ZELLO_NETWORK}`);
 console.error(`  Bot user: ${ZELLO_BOT_USER}`);
 console.error(`  Channels: ${ZELLO_CHANNELS.join(", ")}`);
-const llmLabel = LLM_BACKEND === "local+perplexity" ? `local (${LOCAL_LLM_MODEL}) + perplexity`
+const llmLabel = LLM_BACKEND === "local+perplexity" ? `local (${LOCAL_LLM_MODEL}) + perplexity (${PERPLEXITY_MODEL})`
   : LLM_BACKEND === "local" ? `local (${LOCAL_LLM_MODEL})`
   : `openclaw (${OPENCLAW_AGENT})`;
+console.error(`  Agent:    ${AGENT_NAME}`);
 console.error(`  LLM:      ${llmLabel}`);
 console.error(`  STT:      ${STT_METHOD} (persistent worker)`);
 console.error(`  TTS:      ${TTS_VOICE}`);
