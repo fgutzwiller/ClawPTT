@@ -26,35 +26,26 @@ const ZELLO_BOT_PASS = process.env.ZELLO_BOT_PASS || process.env.ZELLO_ADMIN_PAS
 const ZELLO_CHANNELS = (process.env.ZELLO_BRIDGE_CHANNELS || "").split(",").filter(Boolean);
 const ZELLO_WS_URL = `wss://zellowork.io/ws/${ZELLO_NETWORK}`;
 
+// ─── LLM Backend ──────────────────────────────────────────────────
+// "openclaw" → route through OpenClaw gateway (uses agent's configured model)
+// "local"    → direct OpenAI-compatible LLM call (vLLM/Ollama/etc)
+const LLM_BACKEND = process.env.LLM_BACKEND || "local";
+
 // ─── OpenClaw Gateway (for "openclaw" backend) ────────────────────
 const OPENCLAW_GATEWAY = process.env.OPENCLAW_GATEWAY || "http://127.0.0.1:18789";
 const OPENCLAW_TOKEN = process.env.GATEWAY_TOKEN;
-const OPENCLAW_AGENT = process.env.OPENCLAW_AGENT || "haldeman";
+const OPENCLAW_AGENT = process.env.OPENCLAW_AGENT || "main";
 
-// ─── LLM Backend ──────────────────────────────────────────────────
-// "openclaw"          → route through OpenClaw gateway (uses agent's configured model)
-// "local"             → direct local LLM call (vLLM/Ollama)
-// "local+perplexity"  → Perplexity for real-time data, local LLM for voice formatting
-const LLM_BACKEND = process.env.LLM_BACKEND || "local+perplexity";
-
-// ─── Local LLM (for "local" and "local+perplexity" backends) ──────
+// ─── Local LLM (for "local" backend) ─────────────────────────────
 const LOCAL_LLM_URL = process.env.LOCAL_LLM_URL || "http://127.0.0.1:8888/v1/chat/completions";
-const LOCAL_LLM_API_KEY = process.env.LOCAL_LLM_API_KEY || process.env.LOCAL_VLLM_API_KEY || "vllm-local";
-const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "Qwen/Qwen3-Coder-Next-FP8";
+const LOCAL_LLM_API_KEY = process.env.LOCAL_LLM_API_KEY || "";
+const LOCAL_LLM_MODEL = process.env.LOCAL_LLM_MODEL || "";
 const LOCAL_LLM_MAX_TOKENS = parseInt(process.env.LOCAL_LLM_MAX_TOKENS || "512", 10);
 const LOCAL_LLM_TEMPERATURE = parseFloat(process.env.LOCAL_LLM_TEMPERATURE || "0.7");
 
-// ─── Perplexity (for "local+perplexity" backend) ──────────────────
-const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
-const PERPLEXITY_URL = process.env.PERPLEXITY_URL || "https://api.perplexity.ai/chat/completions";
-const PERPLEXITY_MODEL = process.env.PERPLEXITY_MODEL || "sonar";
-
 // ─── Agent Persona ────────────────────────────────────────────────
-const AGENT_NAME = process.env.AGENT_NAME || "HALDEMAN";
 const AGENT_SYSTEM_PROMPT = process.env.AGENT_SYSTEM_PROMPT ||
-  `You are ${AGENT_NAME}, a concise voice assistant on a Zello PTT radio channel. Keep responses short and spoken-word friendly. No markdown, no bullet points, no special characters. Respond as if speaking on a radio.`;
-const AGENT_SEARCH_PROMPT = process.env.AGENT_SEARCH_PROMPT ||
-  `You are ${AGENT_NAME}, a concise voice assistant on a Zello PTT radio channel. You have been given real-time search data. Summarize it in natural spoken language. No markdown, no bullet points, no special characters, no asterisks. Keep it brief and radio-friendly.`;
+  "You are a concise voice assistant on a Zello PTT radio channel. Keep responses short and spoken-word friendly. No markdown, no bullet points, no special characters. Respond as if speaking on a radio.";
 
 // STT config
 const STT_METHOD = process.env.STT_METHOD || "faster-whisper"; // "faster-whisper" or "zello-transcription"
@@ -181,7 +172,7 @@ function connectZello() {
       password: ZELLO_BOT_PASS,
       channels: ZELLO_CHANNELS,
       listen_only: false,
-      platform_name: "OpenClaw Voice Bridge Gateway",
+      platform_name: "PinchPTT Voice Bridge",
     };
     if (refreshToken) {
       logonCmd.refresh_token = refreshToken;
@@ -443,55 +434,31 @@ async function transcribeAudio(stream) {
 
 // ─── LLM Communication ───────────────────────────────────────────
 async function sendToAgent(text, zelloUser, zelloChannel) {
-  switch (LLM_BACKEND) {
-    case "local+perplexity":
-      return await sendToLocalWithPerplexity(text, zelloUser, zelloChannel);
-    case "local":
-      return await sendToLocalLLM(text);
-    default:
-      return await sendToOpenClaw(text, zelloUser, zelloChannel);
+  if (LLM_BACKEND === "local") {
+    return await sendToLocalLLM(text);
   }
+  return await sendToOpenClaw(text, zelloUser, zelloChannel);
 }
 
-async function queryPerplexity(question) {
+async function sendToLocalLLM(text) {
   const t0 = Date.now();
-  const res = await fetch(PERPLEXITY_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: PERPLEXITY_MODEL,
-      messages: [{ role: "user", content: question }],
-    }),
-  });
+  const body = {
+    model: LOCAL_LLM_MODEL,
+    messages: [
+      { role: "system", content: AGENT_SYSTEM_PROMPT },
+      { role: "user", content: text },
+    ],
+    max_tokens: LOCAL_LLM_MAX_TOKENS,
+    temperature: LOCAL_LLM_TEMPERATURE,
+  };
 
-  if (!res.ok) {
-    console.error(`[pinchptt] Perplexity error ${res.status}`);
-    return null;
-  }
-
-  const data = await res.json();
-  const content = data.choices?.[0]?.message?.content || null;
-  console.error(`[pinchptt] Perplexity (${Date.now() - t0}ms): ${(content || "").slice(0, 100)}`);
-  return content;
-}
-
-async function callLocalLLM(messages) {
-  const t0 = Date.now();
   const res = await fetch(LOCAL_LLM_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${LOCAL_LLM_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model: LOCAL_LLM_MODEL,
-      messages,
-      max_tokens: LOCAL_LLM_MAX_TOKENS,
-      temperature: LOCAL_LLM_TEMPERATURE,
-    }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -505,52 +472,15 @@ async function callLocalLLM(messages) {
   return content;
 }
 
-async function sendToLocalWithPerplexity(text, zelloUser, zelloChannel) {
-  const t0 = Date.now();
-
-  // Step 1: Get real-time context from Perplexity
-  const context = await queryPerplexity(text);
-
-  // Step 2: Summarize with local LLM for voice
-  const messages = [
-    {
-      role: "system",
-      content: context ? AGENT_SEARCH_PROMPT : AGENT_SYSTEM_PROMPT,
-    },
-    {
-      role: "user",
-      content: context
-        ? `The user asked: "${text}"\n\nHere is the real-time data:\n${context}\n\nSummarize for voice.`
-        : text,
-    },
-  ];
-
-  const result = await callLocalLLM(messages);
-  console.error(`[pinchptt] Total local+perplexity (${Date.now() - t0}ms)`);
-  return result;
-}
-
-async function sendToLocalLLM(text) {
-  return await callLocalLLM([
-    { role: "system", content: AGENT_SYSTEM_PROMPT },
-    { role: "user", content: text },
-  ]);
-}
-
 async function sendToOpenClaw(text, zelloUser, zelloChannel) {
+  const t0 = Date.now();
   const url = `${OPENCLAW_GATEWAY}/v1/chat/completions`;
   const body = {
     model: `openclaw:${OPENCLAW_AGENT}`,
     messages: [
-      {
-        role: "user",
-        content: `[Voice from ${zelloUser} on Zello channel "${zelloChannel}"]: ${text}`,
-      },
+      { role: "user", content: text },
     ],
   };
-
-  console.error(`[pinchptt] Sending to OpenClaw (${OPENCLAW_AGENT})`);
-  const t0 = Date.now();
 
   const res = await fetch(url, {
     method: "POST",
@@ -563,36 +493,12 @@ async function sendToOpenClaw(text, zelloUser, zelloChannel) {
 
   if (!res.ok) {
     const errText = await res.text();
-    console.error(`[pinchptt] API error ${res.status}: ${errText}`);
     throw new Error(`OpenClaw API error ${res.status}: ${errText}`);
   }
 
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content || "(no response)";
-  console.error(`[pinchptt] OpenClaw response (${Date.now() - t0}ms): ${content.slice(0, 100)}`);
-
-  // Detect broken responses and retry once
-  if (content === "No response from OpenClaw.") {
-    console.error("[pinchptt] Got empty response, retrying...");
-    const res2 = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENCLAW_TOKEN}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (res2.ok) {
-      const data2 = await res2.json();
-      const content2 = data2.choices?.[0]?.message?.content;
-      if (content2 && content2 !== "No response from OpenClaw.") {
-        console.error(`[pinchptt] Retry succeeded (${Date.now() - t0}ms)`);
-        return content2;
-      }
-    }
-    console.error("[pinchptt] Retry also failed");
-  }
-
+  console.error(`[pinchptt] OpenClaw (${Date.now() - t0}ms): ${content.slice(0, 100)}`);
   return content;
 }
 
@@ -768,10 +674,7 @@ console.error("  PinchPTT — Voice Bridge for OpenClaw");
 console.error(`  Network:  ${ZELLO_NETWORK}`);
 console.error(`  Bot user: ${ZELLO_BOT_USER}`);
 console.error(`  Channels: ${ZELLO_CHANNELS.join(", ")}`);
-const llmLabel = LLM_BACKEND === "local+perplexity" ? `local (${LOCAL_LLM_MODEL}) + perplexity (${PERPLEXITY_MODEL})`
-  : LLM_BACKEND === "local" ? `local (${LOCAL_LLM_MODEL})`
-  : `openclaw (${OPENCLAW_AGENT})`;
-console.error(`  Agent:    ${AGENT_NAME}`);
+const llmLabel = LLM_BACKEND === "local" ? `local (${LOCAL_LLM_MODEL})` : `openclaw (${OPENCLAW_AGENT})`;
 console.error(`  LLM:      ${llmLabel}`);
 console.error(`  STT:      ${STT_METHOD} (persistent worker)`);
 console.error(`  TTS:      ${TTS_VOICE}`);
