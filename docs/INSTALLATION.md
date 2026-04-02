@@ -171,27 +171,110 @@ The bot user (your AI agent) should sit in a **channel**, not just exist as a co
 | Multiple AI channels | Optional | Useful for topic separation (e.g., logistics-ai, intel-ai) |
 | Bot listens to DMs | Automatic | ClawPTT handles DMs by default, no extra config needed |
 
-### Creating the bot user
+### Step 1: Authenticate with the Zello REST API
 
-Use the Zello Work admin console or the REST API:
+All API operations require an authenticated session. You'll need your network admin credentials and API key (from the Zello Work admin console under Settings > API).
+
+<details>
+<summary><b>Via API</b></summary>
 
 ```bash
-# Via Zello REST API (requires admin session)
-curl -sS "https://$NETWORK.zellowork.com/user/save?sid=$SID" \
-  -d "name=ai-voice&password=$PASSWORD_HASH&full_name=AI+Voice&job=Voice+Assistant"
+# Set your credentials
+NETWORK="your-network"
+API_KEY="your-api-key"
+ADMIN_USER="admin"
+ADMIN_PASS="your-admin-password"
+
+# Get a session token
+TOKEN_RES=$(curl -sS "https://$NETWORK.zellowork.com/user/gettoken")
+TOKEN=$(echo "$TOKEN_RES" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['token'])")
+SID=$(echo "$TOKEN_RES" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['sid'])")
+
+# Build the auth hash: md5(md5(password) + token + api_key)
+PASS_HASH=$(echo -n "$ADMIN_PASS" | md5sum | cut -d' ' -f1)
+AUTH_HASH=$(echo -n "${PASS_HASH}${TOKEN}${API_KEY}" | md5sum | cut -d' ' -f1)
+
+# Log in
+curl -sS "https://$NETWORK.zellowork.com/user/login?sid=$SID" \
+  -d "username=$ADMIN_USER&password=$AUTH_HASH"
+
+# All subsequent commands use ?sid=$SID for authentication
 ```
+
+</details>
+
+<details>
+<summary><b>Via admin console</b></summary>
+
+1. Go to `https://your-network.zellowork.com/admin`
+2. Log in with your admin credentials
+3. The admin console provides a UI for all user and channel operations below
+
+</details>
+
+### Step 2: Create the bot user
+
+<details>
+<summary><b>Via API</b></summary>
+
+```bash
+# Hash the bot password (Zello expects md5-hashed passwords)
+BOT_PASS="your-bot-password"
+BOT_PASS_HASH=$(echo -n "$BOT_PASS" | md5sum | cut -d' ' -f1)
+
+# Create the user
+curl -sS "https://$NETWORK.zellowork.com/user/save?sid=$SID" \
+  -d "name=ai-voice&password=$BOT_PASS_HASH&full_name=AI+Voice&job=Voice+Assistant&limited_access=true"
+```
+
+</details>
+
+<details>
+<summary><b>Via admin console</b></summary>
+
+1. Go to **Users** > **Add User**
+2. Set username (e.g., `ai-voice`), password, display name
+3. Set Job/Title to something descriptive (e.g., "Voice Assistant")
+4. Enable **Limited access** to restrict unnecessary DM initiation
+5. Leave **Admin** unchecked
+6. Click **Save**
+
+</details>
 
 The bot user should have:
 - `limited_access: true` — restricts unnecessary 1:1 conversation initiation
 - `admin: false` — no admin console access
 - A descriptive `full_name` and `job` so team members recognize it in the contacts list
 
-### Adding the bot to a channel
+### Step 3: Create a channel
+
+<details>
+<summary><b>Via API</b></summary>
 
 ```bash
-# Create a dedicated AI channel
+# Create a shared (group) channel
 curl -sS "https://$NETWORK.zellowork.com/channel/add/name/AI-Dispatch/shared/true?sid=$SID"
+```
 
+</details>
+
+<details>
+<summary><b>Via admin console</b></summary>
+
+1. Go to **Channels** > **Add Channel**
+2. Set name (e.g., `AI-Dispatch`)
+3. Set type to **Group** (shared) — everyone in the channel hears every transmission
+4. Leave **Invisible** unchecked
+5. Click **Save**
+
+</details>
+
+### Step 4: Add users to the channel
+
+<details>
+<summary><b>Via API</b></summary>
+
+```bash
 # Add the bot user
 curl -sS "https://$NETWORK.zellowork.com/user/addto/AI-Dispatch?sid=$SID" \
   -d "login[]=ai-voice"
@@ -201,17 +284,72 @@ curl -sS "https://$NETWORK.zellowork.com/user/addto/AI-Dispatch?sid=$SID" \
   -d "login[]=field-1&login[]=field-2&login[]=dispatch"
 ```
 
-### Important: channel contact list requirement
+</details>
 
-The Zello Work **streaming WebSocket API** (which ClawPTT uses for real-time audio) only sees channels that are in the bot user's **app-level contact list**. Adding a user to a channel via the REST API creates server-side membership, but the WebSocket API requires the channel to appear in the user's contact list.
+<details>
+<summary><b>Via admin console</b></summary>
 
-To ensure the channel is visible to the WebSocket connection:
+1. Go to **Channels** > click on `AI-Dispatch`
+2. Click **Add Users**
+3. Select `ai-voice` (the bot) and any team members who need AI access
+4. Click **Save**
 
-1. **Log into the Zello app** as the bot user at least once
-2. **Subscribe to the channel** from within the app
-3. After first subscription, the channel persists across WebSocket reconnects
+</details>
 
-If ClawPTT logs `channel not found` despite the user being a member via REST API, this is the cause. The fix is a one-time app login to subscribe.
+### Step 5: Subscribe the bot to the channel (required)
+
+This step is critical and **cannot be done via the REST API**.
+
+The Zello Work **streaming WebSocket API** (which ClawPTT uses for real-time audio) only sees channels that are in the bot user's **app-level contact list**. The REST API creates server-side membership, but the WebSocket API requires the channel to appear in the user's subscribed contact list.
+
+**You must do this once manually:**
+
+1. Install the **Zello Work app** on a phone or desktop
+2. **Log in as the bot user** (e.g., `ai-voice`)
+3. Go to **Channels** > **Browse** > find your channel (e.g., `AI-Dispatch`)
+4. **Tap/click to subscribe** to the channel
+5. Log out of the bot account
+
+After this one-time step, the channel persists across WebSocket reconnects. You don't need to keep the app running.
+
+**How to tell if this step was missed:** ClawPTT logs `channel not found` at startup despite the user being a member via REST API. The fix is always the one-time app subscription.
+
+### Step 6: Verify the setup
+
+<details>
+<summary><b>Via API</b></summary>
+
+```bash
+# Check the user exists and is in the channel
+curl -sS "https://$NETWORK.zellowork.com/user/get/login/ai-voice?sid=$SID"
+
+# Check the channel exists and has members
+curl -sS "https://$NETWORK.zellowork.com/channel/get/name/AI-Dispatch?sid=$SID"
+```
+
+</details>
+
+<details>
+<summary><b>Via admin console</b></summary>
+
+1. Go to **Users** > click on `ai-voice` > verify `AI-Dispatch` appears under Channels
+2. Go to **Channels** > click on `AI-Dispatch` > verify `ai-voice` appears in member list
+
+</details>
+
+<details>
+<summary><b>Via ClawPTT logs</b></summary>
+
+Start ClawPTT and check for successful connection:
+
+```
+[clawptt] Logged in as ai-voice on channels: AI-Dispatch
+[clawptt] Channel AI-Dispatch: 3 users online
+```
+
+If you see `channel not found`, go back to Step 5.
+
+</details>
 
 ### Channel configuration options
 
