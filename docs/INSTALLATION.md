@@ -172,9 +172,11 @@ ClawPTT supports both, but **channels are the recommended configuration**.
 
 ### Why channels, not direct messages
 
-The bot user (your AI agent) should sit in a **channel**, not just exist as a contact for DMs. Here's why:
+The bot user (your AI agent) should sit in a **channel**, not just exist as a contact for DMs. This is both a technical constraint and a design choice.
 
-**Channels provide shared context.** When the bot is in a channel, everyone on the team hears both the question and the AI response. This creates shared situational awareness — a dispatcher hears what field workers are asking, a supervisor hears what the team needs. On radio, information is ambient by design.
+**Technical: Zello's WebSocket API is channel-centric.** The streaming API only receives audio and transcriptions from channels the bot user is subscribed to. There is no "listen to all incoming DMs" mode — DMs work reactively (someone must initiate a DM to the bot), but the bot cannot discover, list, or proactively monitor DMs. Channels are the reliable, deterministic inbound path. The bot subscribes to a channel once and receives every transmission on it — predictably, permanently, with no user action required.
+
+**Design: channels provide shared situational awareness.** When the bot is in a channel, everyone monitoring hears both the question and the AI response. A dispatcher hears what field workers are asking. A supervisor hears what the team needs. On radio, information is ambient by design. The bot sits on a channel the same way a human dispatcher sits on a channel — always listening, always available, transmissions are shared.
 
 **Channels match PTT radio conventions.** In real-world PTT deployments (security, logistics, field ops, emergency response), communication happens on channels. Users are trained to select a channel and transmit. DMs are an afterthought in radio culture. Putting the AI on a channel means zero behavior change for the team.
 
@@ -182,7 +184,7 @@ The bot user (your AI agent) should sit in a **channel**, not just exist as a co
 
 **Channels are operationally visible.** An admin or supervisor can monitor the AI channel to audit what's being asked and answered. DM conversations are invisible to the team.
 
-**DMs still work** — ClawPTT handles them correctly (replies go back to the sender). But they're best suited for private queries that shouldn't be broadcast, not as the primary interaction model.
+**DMs still work** — ClawPTT handles them correctly (replies go back to the sender). But they're reactive, invisible to the team, and not the recommended primary interaction model.
 
 ### Recommended Zello setup
 
