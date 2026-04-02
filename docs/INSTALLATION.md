@@ -14,7 +14,7 @@ ClawPTT bridges this gap. It puts an AI agent on a PTT radio channel. You key up
 
 This project comes from the intersection of three domains:
 
-**Amateur radio (HAM).** The radio operator's instinct is efficiency: minimum bandwidth, maximum information density, standardized protocols (Q-codes, prowords, PACE). ClawPTT borrows from this culture — responses are short, spoken in radio cadence, with clear acknowledgments ("Copy", "Negative", "Stand by"). No filler, no pleasantries, no markdown.
+**Amateur radio (HAM).** The radio operator's instinct is efficiency: minimum bandwidth, maximum information density, standardized protocols. ClawPTT borrows from this culture — the voice agent's system prompt enforces one-sentence responses, plain English prowords ("Copy", "Negative", "Stand by", "Affirm"), no filler, no pleasantries, no markdown. Numbers are spelled out for TTS clarity ("forty-two", not "42"). The PACE fallback pattern (Primary → Alternate → Contingency → Emergency) maps directly to the model routing chain: local vLLM → cloud Sonnet → manual → offline.
 
 **Tactical communications.** Military and security comms operate on the principle that the channel is shared, contested, and time-constrained. ClawPTT is designed with this in mind: the voice agent holds the channel only as long as necessary, gates complex queries to async text channels instead of blocking the radio, and follows a PACE-like fallback architecture (Primary: local vLLM → Alternate: cloud Sonnet → Contingency: manual → Emergency: offline).
 
