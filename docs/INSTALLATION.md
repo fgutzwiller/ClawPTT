@@ -698,6 +698,169 @@ This keeps the voice path fast while supporting deep research when needed.
 
 ---
 
+## Zello Work MCP Server
+
+ClawPTT handles the audio bridge, but your OpenClaw agents also need to **manage** and **query** the Zello network — create users, configure channels, fetch GPS locations, pull message history. This is done through a separate Zello Work MCP server that exposes the full Zello REST API as agent tools.
+
+### Why a separate MCP server?
+
+ClawPTT and the Zello MCP server serve different purposes:
+
+| | ClawPTT | Zello MCP Server |
+|-|---------|-----------------|
+| Protocol | WebSocket streaming API | REST admin API |
+| Purpose | Real-time voice I/O | Network management and data queries |
+| Auth | Bot user credentials | Admin credentials + API key |
+| Used by | ClawPTT bridge process | Any OpenClaw agent |
+| Data | Audio streams | Users, channels, locations, history, roles |
+
+They coexist — ClawPTT uses the streaming API for voice, while agents use the MCP server to manage the network and query data.
+
+### Available tools
+
+The Zello Work MCP server exposes these tools to your agents:
+
+**Session management:**
+| Tool | Description |
+|------|-------------|
+| `zello_login` | Force authenticate with the Zello API |
+| `zello_refresh_token` | Invalidate and re-create the session |
+| `zello_logout` / `zello_logoff` | End the current API session |
+
+**User management:**
+| Tool | Description |
+|------|-------------|
+| `zello_list_users` | List all users or get details for a specific user |
+| `zello_create_user` | Create or update a user (name, password, email, admin, tags) |
+| `zello_delete_users` | Delete one or more users |
+| `zello_add_contacts` | Add direct contacts to a user |
+| `zello_remove_contacts` | Remove direct contacts from a user |
+
+**Channel management:**
+| Tool | Description |
+|------|-------------|
+| `zello_list_channels` | List all channels or get details for a specific one |
+| `zello_create_channel` | Create a new channel (group or dynamic, visible or hidden) |
+| `zello_delete_channels` | Delete one or more channels |
+| `zello_add_users_to_channel` | Add users to a channel |
+| `zello_remove_users_from_channel` | Remove users from a channel |
+
+**Roles:**
+| Tool | Description |
+|------|-------------|
+| `zello_list_roles` | List all roles for a channel |
+| `zello_save_role` | Create or update a role (listen-only, no-disconnect, allow alerts) |
+| `zello_assign_role` | Assign users to a channel role |
+| `zello_delete_role` | Delete roles from a channel |
+
+**Location tracking:**
+| Tool | Description |
+|------|-------------|
+| `zello_get_locations` | Get GPS positions of users within a bounding box (lat/lng, speed, heading, battery, signal) |
+| `zello_get_user_location` | Get current or historical location for a specific user, optionally as GeoJSON |
+
+**Message history:**
+| Tool | Description |
+|------|-------------|
+| `zello_get_history` | Query message metadata — filter by sender, recipient, channel, media type, time range |
+| `zello_get_media` | Get download URL for voice recordings (MP3) or images (JPG) |
+
+### Installation
+
+The MCP server is a standalone Node.js process. Install it alongside ClawPTT:
+
+```bash
+mkdir -p /opt/openclaw/mcp-servers/zello-work
+cd /opt/openclaw/mcp-servers/zello-work
+npm init -y
+npm install @modelcontextprotocol/sdk zod
+```
+
+Create `run.sh`:
+
+```bash
+#!/bin/bash
+set -a
+source /path/to/your/credentials.env
+set +a
+exec node /opt/openclaw/mcp-servers/zello-work/index.js
+```
+
+The server reads these environment variables:
+
+| Variable | Description |
+|----------|-------------|
+| `ZELLO_NETWORK` | Your Zello Work network name |
+| `ZELLO_API_KEY` | API key from the Zello admin console |
+| `ZELLO_ADMIN_USER` | Admin username for REST API auth |
+| `ZELLO_ADMIN_PASS` | Admin password |
+
+### Register with OpenClaw
+
+Add the MCP server to `openclaw.json`:
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "zello-work": {
+        "command": "/opt/openclaw/mcp-servers/zello-work/run.sh"
+      }
+    }
+  }
+}
+```
+
+Restart the gateway. All agents will now have access to the Zello tools.
+
+### Use cases
+
+**Location tracking via voice:**
+
+A field worker transmits on the AI channel: *"Where is the rest of the team?"*
+
+The voice agent:
+1. Receives the transcription via ClawPTT
+2. Calls `zello_get_locations` with `filter: "active"` to get all online users' GPS
+3. Summarizes: *"Field-2 is on Main Street heading north, Dispatch is at the office. Field-3 is offline."*
+
+**Network administration via voice:**
+
+*"Add the new hire Sarah to the Operations channel."*
+
+The agent calls `zello_create_user` and `zello_add_users_to_channel`, then confirms: *"Sarah has been added to Operations."*
+
+**Message history via voice:**
+
+*"Were there any voice messages on Dispatch in the last hour?"*
+
+The agent calls `zello_get_history` with time range and channel filter, summarizes the results.
+
+### Recommended agent tool policy
+
+For voice agents, restrict write operations to prevent accidental changes from misheard commands:
+
+```json
+{
+  "id": "voice",
+  "tools": {
+    "allow": [
+      "zello_list_users",
+      "zello_list_channels",
+      "zello_get_locations",
+      "zello_get_user_location",
+      "zello_get_history",
+      "zello_get_media",
+      "zello_list_roles"
+    ]
+  }
+}
+```
+
+Grant write tools (`zello_create_user`, `zello_delete_users`, etc.) only to admin-facing agents, not the voice agent. A misheard "delete" on radio can be costly.
+
+---
+
 ## NemoClaw Integration
 
 NemoClaw adds NVIDIA's security and privacy guardrails on top of OpenClaw. It's relevant for production voice deployments where:
