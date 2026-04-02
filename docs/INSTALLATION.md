@@ -111,6 +111,133 @@ Understanding what belongs where is critical for a clean deployment.
 - The bot user must be a member of target channels
 - Zello Work API key (from the Zello admin console)
 
+---
+
+## Zello Work Configuration
+
+### How Zello PTT works
+
+Zello Work is a push-to-talk (PTT) radio platform. It operates like traditional two-way radio but over IP. Users press a button to transmit voice; everyone listening on the same channel hears it in real-time.
+
+There are two communication modes:
+
+- **Channels** — group radio. Anyone in the channel hears every transmission. Multiple users can listen simultaneously, one transmits at a time.
+- **Direct messages (DMs)** — private 1:1 communication between two users.
+
+ClawPTT supports both, but **channels are the recommended configuration**.
+
+### Why channels, not direct messages
+
+The bot user (your AI agent) should sit in a **channel**, not just exist as a contact for DMs. Here's why:
+
+**Channels provide shared context.** When the bot is in a channel, everyone on the team hears both the question and the AI response. This creates shared situational awareness — a dispatcher hears what field workers are asking, a supervisor hears what the team needs. On radio, information is ambient by design.
+
+**Channels match PTT radio conventions.** In real-world PTT deployments (security, logistics, field ops, emergency response), communication happens on channels. Users are trained to select a channel and transmit. DMs are an afterthought in radio culture. Putting the AI on a channel means zero behavior change for the team.
+
+**Channels support multi-party interaction.** User A asks a question, the AI responds, User B hears the answer and adds context. This natural radio flow doesn't work in DMs where each conversation is isolated.
+
+**Channels are operationally visible.** An admin or supervisor can monitor the AI channel to audit what's being asked and answered. DM conversations are invisible to the team.
+
+**DMs still work** — ClawPTT handles them correctly (replies go back to the sender). But they're best suited for private queries that shouldn't be broadcast, not as the primary interaction model.
+
+### Recommended Zello setup
+
+```
+┌─────────────────────────────────────────────┐
+│              Zello Work Network              │
+│                                              │
+│   Channels:                                  │
+│   ├── Everyone        (team comms, no bot)   │
+│   ├── AI-Dispatch     (bot listens here)     │
+│   └── Operations      (team comms, no bot)   │
+│                                              │
+│   Users:                                     │
+│   ├── admin           (network admin)        │
+│   ├── field-1         (field worker)         │
+│   ├── field-2         (field worker)         │
+│   ├── dispatch        (dispatcher)           │
+│   └── ai-voice        (ClawPTT bot) ◄────── │
+│                                              │
+└─────────────────────────────────────────────┘
+```
+
+**Key decisions:**
+
+| Decision | Recommendation | Why |
+|----------|---------------|-----|
+| Dedicated channel for AI | Yes | Keeps AI traffic separate from operational chatter |
+| Bot on "Everyone" channel | No | Too noisy — bot responds to everything, disrupts team comms |
+| Bot user as admin | No | Use a service account with minimal permissions |
+| Multiple AI channels | Optional | Useful for topic separation (e.g., logistics-ai, intel-ai) |
+| Bot listens to DMs | Automatic | ClawPTT handles DMs by default, no extra config needed |
+
+### Creating the bot user
+
+Use the Zello Work admin console or the REST API:
+
+```bash
+# Via Zello REST API (requires admin session)
+curl -sS "https://$NETWORK.zellowork.com/user/save?sid=$SID" \
+  -d "name=ai-voice&password=$PASSWORD_HASH&full_name=AI+Voice&job=Voice+Assistant"
+```
+
+The bot user should have:
+- `limited_access: true` — restricts unnecessary 1:1 conversation initiation
+- `admin: false` — no admin console access
+- A descriptive `full_name` and `job` so team members recognize it in the contacts list
+
+### Adding the bot to a channel
+
+```bash
+# Create a dedicated AI channel
+curl -sS "https://$NETWORK.zellowork.com/channel/add/name/AI-Dispatch/shared/true?sid=$SID"
+
+# Add the bot user
+curl -sS "https://$NETWORK.zellowork.com/user/addto/AI-Dispatch?sid=$SID" \
+  -d "login[]=ai-voice"
+
+# Add team members who should have AI access
+curl -sS "https://$NETWORK.zellowork.com/user/addto/AI-Dispatch?sid=$SID" \
+  -d "login[]=field-1&login[]=field-2&login[]=dispatch"
+```
+
+### Important: channel contact list requirement
+
+The Zello Work **streaming WebSocket API** (which ClawPTT uses for real-time audio) only sees channels that are in the bot user's **app-level contact list**. Adding a user to a channel via the REST API creates server-side membership, but the WebSocket API requires the channel to appear in the user's contact list.
+
+To ensure the channel is visible to the WebSocket connection:
+
+1. **Log into the Zello app** as the bot user at least once
+2. **Subscribe to the channel** from within the app
+3. After first subscription, the channel persists across WebSocket reconnects
+
+If ClawPTT logs `channel not found` despite the user being a member via REST API, this is the cause. The fix is a one-time app login to subscribe.
+
+### Channel configuration options
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `shared` | `true` | Group channel — all members hear all transmissions |
+| `invisible` | `false` | Keep the channel visible so users can find it |
+| `dispatch` | `false` | Dispatch mode creates a queue — not needed for AI |
+| `full_duplex` | `false` | Standard PTT (one speaker at a time) |
+
+### Multiple channels
+
+ClawPTT can join multiple channels simultaneously:
+
+```bash
+ZELLO_BRIDGE_CHANNELS=AI-Dispatch,AI-Intel,AI-Logistics
+```
+
+The bot listens on all configured channels and responds on whichever channel the transmission came from. Each channel shares the same agent — if you need different agents per channel, run multiple ClawPTT instances.
+
+### Network sizing
+
+Zello Work has per-network user limits depending on your plan. The bot user counts as one user. Plan accordingly if you're near the limit.
+
+The WebSocket streaming API supports joining up to **100 channels** per connection.
+
 ### Hardware
 
 | Component | Minimum | Recommended |
