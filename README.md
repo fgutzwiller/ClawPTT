@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/clawtalk-icon-white-clean.png" alt="ClawPTT" width="128">
+</p>
+
 # ClawPTT
 
 Zello Work voice bridge for OpenClaw. Connects push-to-talk radio to AI agents via real-time speech-to-speech processing.
