@@ -521,19 +521,168 @@ Rules:
 - End with a clear signal that you're done ("Over", "Standing by", etc.)
 ```
 
-### Subagent delegation
+### Two-tier architecture: fast voice + async deep research
 
-For complex queries that need deep research, the voice agent should delegate to a text-based subagent and summarize the result:
+Voice has a hard constraint that text channels don't: **dead air is failure**. A user on Zello, WhatsApp voice, or any PTT system cannot wait 30-60 seconds for a response. But some questions genuinely require deep research (multi-step search, cross-domain analysis, document drafting).
+
+The solution is a two-tier agent architecture:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        Tier 1: Voice Agent                        │
+│                                                                    │
+│  Fast, lightweight, focused skillset                               │
+│  Model: local vLLM (sub-2s inference)                              │
+│  Skills: weather, calendar, email triage, search, locations        │
+│  Target: answer in 1-5 seconds                                     │
+│                                                                    │
+│  Can answer directly:              Must escalate:                  │
+│  "Weather in Barcelona?"           "Analyze the tax implications"  │
+│  "Where's Jack?"                   "Write a board memo"            │
+│  "Any SpaceX news?"                "Compare IPO scenarios"         │
+│  "What's on my calendar?"          "Send email to Luca"            │
+└─────────┬────────────────────────────────────────────────────────┘
+          │ gate triggers
+          ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                     Tier 2: Research Agent                         │
+│                                                                    │
+│  Full skills, deep reasoning, no time constraint                   │
+│  Model: cloud Opus/Sonnet (frontier reasoning)                     │
+│  Skills: all (55+), including domain agents, write operations      │
+│  Runs async — posts results to text channel (Slack, WhatsApp, etc) │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Why this matters for any voice or chat system
+
+This pattern applies regardless of the voice/chat transport:
+
+| Transport | Tier 1 (voice agent) | Tier 2 (research agent) |
+|-----------|---------------------|------------------------|
+| **Zello PTT** | Speaks response via TTS | Posts to Slack #channel |
+| **WhatsApp voice** | Sends voice note or text reply | Sends detailed text message |
+| **Discord voice** | Speaks in voice channel | Posts in text channel |
+| **Telegram** | Quick text reply | Detailed follow-up message |
+| **Phone call** | Speaks response | Sends SMS or email with details |
+
+The voice agent always responds immediately. The research agent always delivers asynchronously to a text-capable channel where the user can read at their own pace.
+
+### Configuration
+
+**Voice agent (Tier 1) — limited skills for speed:**
 
 ```json
 {
+  "id": "voice",
+  "name": "voice",
+  "workspace": "~/.openclaw/workspace-voice",
+  "model": {
+    "primary": "vllm/Qwen/Qwen3-Coder-Next-FP8",
+    "fallbacks": [
+      "anthropic/claude-sonnet-4-6"
+    ]
+  },
+  "skills": [
+    "weather",
+    "gws-calendar-agenda",
+    "gws-gmail-triage",
+    "gws-gmail",
+    "gws-shared",
+    "folk-crm",
+    "unifi-network",
+    "slack"
+  ],
   "subagents": {
-    "allowAgents": ["research-agent"]
+    "allowAgents": ["research"]
   }
 }
 ```
 
-The voice agent asks the research agent for data, then summarizes it in spoken form.
+Key decisions:
+- **Limited `skills` array** — only the tools the voice agent needs for quick lookups. Every skill added increases the prompt size and slows inference. 8-12 skills is the sweet spot.
+- **No Ollama in fallbacks** — on GPU systems like DGX Spark, Ollama (GGUF/llama.cpp) is 50-80x slower than vLLM (native CUDA FP8). Skip straight to cloud fallback.
+- **Single subagent** — the voice agent only spawns the research agent, never domain specialists directly.
+
+**Research agent (Tier 2) — full skills, no speed constraint:**
+
+```json
+{
+  "id": "research",
+  "name": "research",
+  "workspace": "~/.openclaw/workspace-research",
+  "model": {
+    "primary": "anthropic/claude-opus-4-6",
+    "fallbacks": [
+      "anthropic/claude-sonnet-4-6",
+      "vllm/Qwen/Qwen3-Coder-Next-FP8"
+    ]
+  }
+}
+```
+
+No skill restrictions. The research agent has access to everything — web search, document drafting, email sending, calendar writes, domain agents, deep analysis. It takes as long as it needs and posts results to a text channel.
+
+### Gate logic in the voice agent's system prompt
+
+Add this to the voice agent's `SOUL.md` or system prompt:
+
+```
+## GATE: What you handle vs what you escalate
+
+HANDLE DIRECTLY (you have the tools, answer in 1-2 sentences):
+- Weather, time, date, math
+- Calendar: "What's on today?" → gws-calendar-agenda
+- Email: "Any important email?" → gws-gmail-triage
+- Search: "SpaceX news?" → Perplexity
+- Location: "Where's Jack?" → Zello API + reverse geocode
+- Network: "Is the internet up?" → UniFi
+- Contacts: "Who is Luca?" → Folk CRM
+
+ESCALATE TO RESEARCH AGENT (async, results on text channel):
+- Deep analysis: "Analyze...", "Compare...", "Evaluate..."
+- Document creation: "Write a memo...", "Draft an email..."
+- Write operations: "Send email to...", "Create a calendar event..."
+- Multi-domain queries: "What's the portfolio status?"
+- Anything requiring 3+ tool calls or 3+ sentences of output
+
+GATE PROTOCOL:
+1. "That needs [research-agent]. Want me to route it?"
+2. Wait for confirmation ("yes", "go ahead")
+3. Spawn research agent asynchronously — do NOT wait for result
+4. "Routed. Results will be on [text channel]."
+
+NEVER wait for the research agent inline. Dead air on voice = failure.
+The research agent posts directly to the text channel when done.
+
+EMERGENCY (L1/L2 — safety, legal, financial):
+- Route immediately without confirmation
+- "Routing now. Check [text channel]."
+```
+
+### Why limited skills matter for performance
+
+Every skill injected into the voice agent's prompt adds ~200-500 tokens of tool definitions. With 55 skills, that's ~15,000 extra tokens per request. On a local model:
+
+| Skills loaded | Prompt size | Inference time (simple query) |
+|--------------|-------------|-------------------------------|
+| 8-10 skills | ~6K tokens | ~1.5s |
+| 25 skills | ~12K tokens | ~3-5s |
+| 55 skills | ~20K tokens | ~5-15s (intermittent timeouts) |
+
+The voice agent should have the minimum skills needed for its direct-answer queries. Everything else goes through the research agent, which has no latency constraint.
+
+### Subagent delegation
+
+The voice agent spawns the research agent with `sessions_spawn`:
+
+```
+sessions_spawn(agentId="research", task="[user's question]. Post results to #channel via message tool.", runtime="subagent")
+```
+
+The `runtime: "subagent"` flag runs it asynchronously. The voice agent does not await the result — it responds to the user immediately and moves on.
+
+If your research agent is a coordinator (like HALDEMAN in the WATERGATE architecture), it can in turn spawn domain-specialist subagents for legal, financial, portfolio, or operational queries.
 
 ---
 
@@ -543,16 +692,17 @@ The voice agent asks the research agent for data, then summarizes it in spoken f
 
 The voice loop has a latency budget. Every second the user waits feels unnatural on radio.
 
-| Model | Latency | Quality | Best for |
-|-------|---------|---------|----------|
-| **vLLM / Qwen3-Coder-Next-FP8** | ~1-3s | Very good | Primary voice model, fast local inference |
-| **Ollama / qwen3:32b** | ~2-4s | Good | Fallback when vLLM is busy |
-| **Ollama / qwen2.5:14b** | ~0.5-1s | Adequate | Fastest local option for simple queries |
-| **Anthropic / claude-sonnet-4-6** | ~3-5s | Excellent | Cloud fallback, best quality |
-| **Anthropic / claude-opus-4-6** | ~5-15s | Best | Too slow for primary voice, use for research |
-| **NVIDIA NIM / kimi-k2.5** | ~2-4s | Good | Cloud alternative with large context |
+| Model | Engine | Latency | Quality | Best for |
+|-------|--------|---------|---------|----------|
+| **Qwen3-Coder-Next-FP8** | vLLM | ~0.3s direct, ~1.5s via gateway | Very good | Primary voice model |
+| **claude-sonnet-4-6** | Anthropic cloud | ~3-5s | Excellent | Cloud fallback for voice |
+| **claude-opus-4-6** | Anthropic cloud | ~5-15s | Best | Research agent (Tier 2), too slow for voice |
+| **kimi-k2.5** | NVIDIA NIM | ~2-4s | Good | Cloud alternative with large context |
+| **qwen3:32b** | Ollama (GGUF) | ~16-26s | Good | **Not recommended for voice** |
 
-**Recommendation:** Use a fast local model as primary (vLLM with Qwen3-Coder-Next) with a cloud model as fallback. The latency difference between local and cloud is 2-10x.
+**Important: Ollama vs vLLM on GPU systems.** On hardware with native CUDA support (DGX Spark, any NVIDIA GPU), vLLM with FP8 quantization is 50-80x faster than Ollama with GGUF quantization. Ollama uses llama.cpp which doesn't fully leverage GPU tensor cores. Don't use Ollama models in the voice fallback chain — skip straight to a cloud model.
+
+**Recommendation:** `vLLM (local, ~1.5s) → cloud Sonnet (~4s)`. Two-step fallback. No Ollama in the voice path.
 
 ### Latency budget breakdown
 
@@ -635,229 +785,117 @@ When the user asks a factual question:
 
 ---
 
-## Gate Settings for Deep Research
+## Gate Settings and Execution Policy
 
-Not all queries should be answered in real-time. Gate settings control when the agent pauses for approval vs. proceeds autonomously.
+### Exec policy for voice agents
 
-### Recommended gate strategy for voice
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Query Classification                   │
-│                                                           │
-│   Simple factual → Autonomous (fast path)                 │
-│   "What time is it?" / "Weather in Barcelona?"            │
-│                                                           │
-│   Complex research → Gate (delegate to subagent)          │
-│   "Compare Q1 earnings for NVDA vs AMD"                   │
-│                                                           │
-│   Dangerous action → Gate (require confirmation)          │
-│   "Delete user X" / "Send email to Y"                     │
-└─────────────────────────────────────────────────────────┘
-```
-
-### OpenClaw exec and tool policy
-
-```json
-{
-  "tools": {
-    "exec": {
-      "security": "allowlist",
-      "ask": "on-miss"
-    }
-  }
-}
-```
-
-- `security: "allowlist"` — only pre-approved commands can execute
-- `ask: "on-miss"` — prompt for approval when a tool isn't in the allowlist
-
-For voice agents, you want `ask: "off"` on the voice agent itself (so it doesn't block waiting for text approval that can't come over radio), but gate dangerous operations by not giving the voice agent access to destructive tools:
+Voice agents cannot block waiting for interactive approval — there's no text input on radio. Set `ask: "off"` and control access structurally via the `skills` array instead:
 
 ```json
 {
   "id": "voice",
+  "skills": ["weather", "gws-calendar-agenda", "gws-gmail-triage", "gws-gmail", "gws-shared", "folk-crm", "unifi-network", "slack"],
   "tools": {
-    "allow": ["web_search", "calendar_read", "weather"],
-    "deny": ["calendar_write", "email_send", "user_delete"]
-  }
-}
-```
-
-### Deep research pattern
-
-When a voice query requires extensive research:
-
-1. Voice agent recognizes the query is complex
-2. Delegates to a research subagent (which can use Opus-class models, multiple search passes, etc.)
-3. Research subagent runs asynchronously
-4. Voice agent responds: "Let me look into that. I'll have an answer shortly."
-5. When research completes, voice agent summarizes on the next interaction
-
-This keeps the voice path fast while supporting deep research when needed.
-
----
-
-## Zello Work MCP Server
-
-ClawPTT handles the audio bridge, but your OpenClaw agents also need to **manage** and **query** the Zello network — create users, configure channels, fetch GPS locations, pull message history. This is done through a separate Zello Work MCP server that exposes the full Zello REST API as agent tools.
-
-### Why a separate MCP server?
-
-ClawPTT and the Zello MCP server serve different purposes:
-
-| | ClawPTT | Zello MCP Server |
-|-|---------|-----------------|
-| Protocol | WebSocket streaming API | REST admin API |
-| Purpose | Real-time voice I/O | Network management and data queries |
-| Auth | Bot user credentials | Admin credentials + API key |
-| Used by | ClawPTT bridge process | Any OpenClaw agent |
-| Data | Audio streams | Users, channels, locations, history, roles |
-
-They coexist — ClawPTT uses the streaming API for voice, while agents use the MCP server to manage the network and query data.
-
-### Available tools
-
-The Zello Work MCP server exposes these tools to your agents:
-
-**Session management:**
-| Tool | Description |
-|------|-------------|
-| `zello_login` | Force authenticate with the Zello API |
-| `zello_refresh_token` | Invalidate and re-create the session |
-| `zello_logout` / `zello_logoff` | End the current API session |
-
-**User management:**
-| Tool | Description |
-|------|-------------|
-| `zello_list_users` | List all users or get details for a specific user |
-| `zello_create_user` | Create or update a user (name, password, email, admin, tags) |
-| `zello_delete_users` | Delete one or more users |
-| `zello_add_contacts` | Add direct contacts to a user |
-| `zello_remove_contacts` | Remove direct contacts from a user |
-
-**Channel management:**
-| Tool | Description |
-|------|-------------|
-| `zello_list_channels` | List all channels or get details for a specific one |
-| `zello_create_channel` | Create a new channel (group or dynamic, visible or hidden) |
-| `zello_delete_channels` | Delete one or more channels |
-| `zello_add_users_to_channel` | Add users to a channel |
-| `zello_remove_users_from_channel` | Remove users from a channel |
-
-**Roles:**
-| Tool | Description |
-|------|-------------|
-| `zello_list_roles` | List all roles for a channel |
-| `zello_save_role` | Create or update a role (listen-only, no-disconnect, allow alerts) |
-| `zello_assign_role` | Assign users to a channel role |
-| `zello_delete_role` | Delete roles from a channel |
-
-**Location tracking:**
-| Tool | Description |
-|------|-------------|
-| `zello_get_locations` | Get GPS positions of users within a bounding box (lat/lng, speed, heading, battery, signal) |
-| `zello_get_user_location` | Get current or historical location for a specific user, optionally as GeoJSON |
-
-**Message history:**
-| Tool | Description |
-|------|-------------|
-| `zello_get_history` | Query message metadata — filter by sender, recipient, channel, media type, time range |
-| `zello_get_media` | Get download URL for voice recordings (MP3) or images (JPG) |
-
-### Installation
-
-The MCP server is a standalone Node.js process. Install it alongside ClawPTT:
-
-```bash
-mkdir -p /opt/openclaw/mcp-servers/zello-work
-cd /opt/openclaw/mcp-servers/zello-work
-npm init -y
-npm install @modelcontextprotocol/sdk zod
-```
-
-Create `run.sh`:
-
-```bash
-#!/bin/bash
-set -a
-source /path/to/your/credentials.env
-set +a
-exec node /opt/openclaw/mcp-servers/zello-work/index.js
-```
-
-The server reads these environment variables:
-
-| Variable | Description |
-|----------|-------------|
-| `ZELLO_NETWORK` | Your Zello Work network name |
-| `ZELLO_API_KEY` | API key from the Zello admin console |
-| `ZELLO_ADMIN_USER` | Admin username for REST API auth |
-| `ZELLO_ADMIN_PASS` | Admin password |
-
-### Register with OpenClaw
-
-Add the MCP server to `openclaw.json`:
-
-```json
-{
-  "mcp": {
-    "servers": {
-      "zello-work": {
-        "command": "/opt/openclaw/mcp-servers/zello-work/run.sh"
-      }
+    "exec": {
+      "security": "full",
+      "ask": "off"
     }
   }
 }
 ```
 
-Restart the gateway. All agents will now have access to the Zello tools.
+The voice agent can only use the skills listed. Write operations (email send, calendar create, user delete) are not in the list — the agent physically cannot call them. No runtime approval needed.
+
+### Gate flow in practice
+
+```
+User (on radio): "What's the weather?"
+Voice agent: [calls weather tool] → "Twenty degrees, partly cloudy." (3s)
+
+User (on radio): "Write a board memo on the Voliro situation"
+Voice agent: "That needs the research agent. Want me to route it?"
+User: "Go ahead"
+Voice agent: [spawns research agent async] → "Routed. Results on Slack." (4s)
+Research agent: [runs 30-60s on Opus, posts to Slack when done]
+
+User (on radio): "Jack fell off his bike"
+Voice agent: [L1 emergency — no confirmation needed]
+→ "Routing to research agent now. Check Slack." [spawns immediately] (2s)
+```
+
+The voice path never blocks. Deep research and write operations always go async to a text channel.
+
+---
+
+## Zello Work REST API
+
+ClawPTT includes a built-in REST API for Zello Work admin and data operations. It runs in-process with the voice bridge — one process, one Zello session, zero extra overhead.
+
+### How it works
+
+When `ZELLO_API_KEY` is set, ClawPTT starts an HTTP server (default port 18790) alongside the voice bridge. Agents call it via standard HTTP — no MCP server, no extra processes.
+
+```
+┌──────────────────────────────────────────────────┐
+│ ClawPTT (single process)                          │
+│                                                    │
+│  bridge.js ── Voice (WebSocket, Opus, STT/TTS)    │
+│  api.js ───── REST API (HTTP, port 18790)         │
+│  zello.js ─── ZelloAPI class (shared session)     │
+└──────────────────────────────────────────────────┘
+```
+
+### Endpoints
+
+All endpoints require `Authorization: Bearer <token>` (defaults to `GATEWAY_TOKEN`).
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check + session status |
+| `/users` | GET | List users or get specific user (`?username=X`) |
+| `/users` | POST | Create/update user |
+| `/users` | DELETE | Delete users |
+| `/channels` | GET | List channels or get specific (`?name=X`) |
+| `/channels` | POST | Create channel |
+| `/channels/members` | POST/DELETE | Add/remove channel members |
+| `/contacts` | POST/DELETE | Add/remove user contacts |
+| `/roles` | GET/POST/DELETE | Channel roles |
+| `/roles/assign` | POST | Assign users to roles |
+| `/locations` | GET | GPS locations (`?filter=active` for all online users) |
+| `/locations/user` | GET | Per-user location (`?username=X&history=true&format=geojson`) |
+| `/history` | GET | Message history (`?sender=X&via_channel=Y&type=voice&max=10`) |
+| `/media` | GET | Media download URL (`?media_key=X`) |
+| `/session/refresh` | POST | Refresh Zello API session |
+
+### Configuration
+
+Add to your `.env`:
+
+```bash
+ZELLO_API_KEY=your-api-key           # from Zello admin console → Settings → API
+ZELLO_ADMIN_USER=admin               # falls back to ZELLO_BOT_USER
+ZELLO_ADMIN_PASS=admin-password      # falls back to ZELLO_BOT_PASS
+CLAWPTT_API_PORT=18790               # default
+CLAWPTT_API_TOKEN=your-token         # default: same as GATEWAY_TOKEN
+```
 
 ### Use cases
 
 **Location tracking via voice:**
 
-A field worker transmits on the AI channel: *"Where is the rest of the team?"*
+*"Where is the rest of the team?"*
 
-The voice agent:
-1. Receives the transcription via ClawPTT
-2. Calls `zello_get_locations` with `filter: "active"` to get all online users' GPS
-3. Summarizes: *"Field-2 is on Main Street heading north, Dispatch is at the office. Field-3 is offline."*
+The voice agent calls `GET /locations?filter=active`, reverse-geocodes each GPS position, and responds: *"Field-2 is on Main Street heading north, Dispatch is at the office. Field-3 is offline."*
 
-**Network administration via voice:**
-
-*"Add the new hire Sarah to the Operations channel."*
-
-The agent calls `zello_create_user` and `zello_add_users_to_channel`, then confirms: *"Sarah has been added to Operations."*
-
-**Message history via voice:**
+**Message history:**
 
 *"Were there any voice messages on Dispatch in the last hour?"*
 
-The agent calls `zello_get_history` with time range and channel filter, summarizes the results.
+The agent calls `GET /history?via_channel=Dispatch&type=voice&start_ts=<epoch>`, summarizes the results.
 
-### Recommended agent tool policy
+**Network administration (via research agent, not voice):**
 
-For voice agents, restrict write operations to prevent accidental changes from misheard commands:
-
-```json
-{
-  "id": "voice",
-  "tools": {
-    "allow": [
-      "zello_list_users",
-      "zello_list_channels",
-      "zello_get_locations",
-      "zello_get_user_location",
-      "zello_get_history",
-      "zello_get_media",
-      "zello_list_roles"
-    ]
-  }
-}
-```
-
-Grant write tools (`zello_create_user`, `zello_delete_users`, etc.) only to admin-facing agents, not the voice agent. A misheard "delete" on radio can be costly.
+Write operations like creating users or modifying channels should go through the research/admin agent (Tier 2), not the voice agent. A misheard "delete" on radio can be costly. The voice agent should only use read endpoints.
 
 ---
 
