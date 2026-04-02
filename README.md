@@ -2,9 +2,11 @@
 
 # ClawPTT
 
-AI on push-to-talk radio. Key up, ask a question, get a spoken answer — everyone on the channel hears it.
+A voice bridge for [OpenClaw](https://openclaw.com). Puts your OpenClaw agents on push-to-talk radio via [Zello Work](https://zellowork.com) — key up, ask a question, get a spoken answer. Everyone on the channel hears it.
 
-ClawPTT connects [Zello Work](https://zellowork.com) PTT networks to AI agents via [OpenClaw](https://github.com/nicepkg/openclaw) (or any OpenAI-compatible endpoint). Text in from Zello's server-side transcription, audio out via offline TTS. Single Node.js process, no cloud dependency for routine queries.
+Built as a stopgap until OpenClaw ships native voice on iOS. If you're reading this and OpenClaw already has a voice interface on mobile — you probably don't need ClawPTT. Use the real thing.
+
+Until then: text in from Zello's server-side transcription, audio out via offline TTS. Single Node.js process, no cloud dependency for routine queries.
 
 ## How it works
 
