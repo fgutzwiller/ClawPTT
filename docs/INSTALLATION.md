@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="../assets/clawtalk-icon-white-clean.png" alt="ClawPTT" width="192">
-</p>
+<img src="../assets/clawtalk-icon-white-clean.png" alt="ClawPTT" width="192">
 
 # ClawPTT — Installation and Configuration Guide
 
