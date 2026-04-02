@@ -27,16 +27,25 @@ ClawPTT is the voice transport layer in a three-tier stack:
 ┌──────────────────────────────────────────────────────────────┐
 │                     Zello Work Network                        │
 │              (PTT radio — phones, desktops, radios)           │
-└──────────────────────┬───────────────────────────────────────┘
-                       │ WebSocket (Opus audio)
-┌──────────────────────▼───────────────────────────────────────┐
+└──────────┬──────────────────────────────────────┬────────────┘
+           │ Inbound: text                        │ Outbound: Opus audio
+           │ (Zello server-side transcription      │ (TTS → Opus encode → stream)
+           │  or Opus → local Whisper STT)         │
+┌──────────▼──────────────────────────────────────▼────────────┐
 │                      ClawPTT                                  │
 │                                                               │
-│   Voice I/O only:                                             │
-│   • Opus decode/encode (@discordjs/opus)                      │
-│   • Speech-to-text (faster-whisper, persistent worker)        │
+│   Inbound (two modes):                                        │
+│   • Zello transcription (default) — text delivered by Zello   │
+│   • Local Whisper STT (fallback) — Opus decode → PCM → WAV   │
+│                                                               │
+│   Outbound:                                                   │
 │   • Text-to-speech (sherpa-onnx / Piper voices)               │
+│   • Opus encode (@discordjs/opus) → stream to Zello           │
+│                                                               │
+│   Also:                                                       │
 │   • Text sanitization (markdown → spoken word)                │
+│   • Conversation history (rolling buffer per channel)         │
+│   • Zello REST API (admin/data, port 18790)                   │
 │   • DM and channel support                                    │
 │                                                               │
 │   Does NOT handle: model selection, tools, search, persona    │
@@ -50,7 +59,7 @@ ClawPTT is the voice transport layer in a three-tier stack:
 │   • Tool execution (web search, calendars, APIs)              │
 │   • Memory and session management                             │
 │   • Agent persona and system prompts                          │
-│   • Subagent delegation                                       │
+│   • Subagent delegation (Tier 1 → Tier 2 async gate)         │
 │                                                               │
 │   Optional: NemoClaw layer for security guardrails            │
 └──────────────────────┬───────────────────────────────────────┘
@@ -58,11 +67,13 @@ ClawPTT is the voice transport layer in a three-tier stack:
 ┌──────────────────────▼───────────────────────────────────────┐
 │                    LLM Backends                               │
 │                                                               │
-│   Local:  vLLM, Ollama, LiteLLM                              │
-│   Cloud:  Anthropic, OpenAI, NVIDIA NIM, Google               │
+│   Local:  vLLM (primary, FP8, ~0.3s inference)               │
+│   Cloud:  Anthropic, NVIDIA NIM (fallback + research)         │
 │   Hybrid: local primary with cloud fallback                   │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+**Inbound flow:** Zello delivers transcription text via `on_transcription` WebSocket events (server-side STT). ClawPTT receives text directly — no Opus decoding needed on the inbound path. A local faster-whisper fallback exists (`STT_METHOD=faster-whisper`) for networks without Zello transcription enabled, but the default path is text-in, audio-out.
 
 ## Component Demarcation
 
@@ -73,11 +84,12 @@ Understanding what belongs where is critical for a clean deployment.
 | Concern | Details |
 |---------|---------|
 | Zello transport | WebSocket connection, authentication, channel management, reconnect |
-| Audio codec | Opus decode (inbound) and encode (outbound) at 16kHz mono |
-| Speech-to-text | faster-whisper with persistent model worker (no reload per request) |
+| Inbound text | Receives transcription text from Zello (server-side STT). Local Whisper fallback available. |
+| Outbound audio | TTS → Opus encode (16kHz mono) → stream to Zello at 60ms intervals |
 | Text-to-speech | sherpa-onnx with Piper VITS voices, fully offline |
 | Text sanitization | Strips markdown, URLs, emojis, special characters before TTS |
-| Audio pacing | Sends Opus frames at correct cadence (60ms intervals) |
+| Conversation history | Rolling buffer per channel (10 turns, 5min TTL) |
+| Zello REST API | In-process admin/data API on port 18790 (users, channels, locations, history) |
 
 ### ClawPTT does NOT handle:
 

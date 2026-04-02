@@ -13,7 +13,7 @@ Zello Work voice bridge and REST API for OpenClaw. Connects push-to-talk radio t
 │ ClawPTT (single Node.js process)                                      │
 │                                                                        │
 │  bridge.js ─── Voice Bridge (WebSocket streaming API)                  │
-│  │  Zello PTT → Opus → PCM → Whisper STT → LLM → TTS → Opus → Zello │
+│  │  Zello PTT → text (server-side STT) → LLM → TTS → Opus → Zello   │
 │  │  Conversation history (rolling buffer, 10 turns, 5min TTL)         │
 │  │  Retry logic: 6 attempts, exponential backoff for start_stream     │
 │  │                                                                     │
@@ -28,11 +28,13 @@ Zello Work voice bridge and REST API for OpenClaw. Connects push-to-talk radio t
 
 ### Voice bridge (bridge.js)
 
-1. User presses PTT on Zello, audio streams via WebSocket
-2. Opus frames decoded to PCM, transcribed by faster-whisper (persistent worker)
+1. User presses PTT on Zello, speaks
+2. Zello delivers transcription text via WebSocket (`on_transcription` event)
 3. Text sent to LLM (OpenClaw gateway or any OpenAI-compatible endpoint)
 4. Response converted to speech by sherpa-onnx/Piper TTS
-5. Audio streamed back to Zello
+5. Opus-encoded audio streamed back to Zello
+
+Inbound is text — Zello handles speech-to-text server-side. A local faster-whisper fallback exists for networks without Zello transcription. Outbound is audio (TTS → Opus encode → stream).
 
 Supports channel broadcasts, direct messages, and per-channel conversation history.
 
