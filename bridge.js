@@ -565,39 +565,55 @@ async function sendAudioToZello(wavPath, channel) {
   // base64 of [0x80, 0x3E, 0x01, 0x3C] = "gD4BPA=="
   const codecHeader = "gD4BPA==";
 
-  // Start stream
-  const startSeq = nextSeq();
-  const startCmd = {
-    command: "start_stream",
-    seq: startSeq,
-    channel,
-    type: "audio",
-    codec: "opus",
-    codec_header: codecHeader,
-    packet_duration: FRAME_DURATION_MS,
-  };
+  // Start stream (with retry for DMs where the channel may not be ready immediately)
+  const MAX_START_RETRIES = 3;
+  const RETRY_DELAY_MS = 2000;
+  let streamId;
 
-  const streamId = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("start_stream timeout")), 10000);
-
-    const handler = (data, isBinary) => {
-      if (isBinary) return;
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.seq === startSeq) {
-          clearTimeout(timeout);
-          ws.off("message", handler);
-          if (msg.success) {
-            resolve(msg.stream_id);
-          } else {
-            reject(new Error(`start_stream failed: ${msg.error}`));
-          }
-        }
-      } catch {}
+  for (let attempt = 1; attempt <= MAX_START_RETRIES; attempt++) {
+    const seq = nextSeq();
+    const startCmd = {
+      command: "start_stream",
+      seq,
+      channel,
+      type: "audio",
+      codec: "opus",
+      codec_header: codecHeader,
+      packet_duration: FRAME_DURATION_MS,
     };
-    ws.on("message", handler);
-    ws.send(JSON.stringify(startCmd));
-  });
+
+    try {
+      streamId = await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("start_stream timeout")), 10000);
+
+        const handler = (data, isBinary) => {
+          if (isBinary) return;
+          try {
+            const msg = JSON.parse(data.toString());
+            if (msg.seq === seq) {
+              clearTimeout(timeout);
+              ws.off("message", handler);
+              if (msg.success) {
+                resolve(msg.stream_id);
+              } else {
+                reject(new Error(msg.error || "unknown error"));
+              }
+            }
+          } catch {}
+        };
+        ws.on("message", handler);
+        ws.send(JSON.stringify(startCmd));
+      });
+      break; // success
+    } catch (err) {
+      if (attempt < MAX_START_RETRIES && err.message.includes("not ready")) {
+        console.error(`[clawptt] start_stream attempt ${attempt} failed (${err.message}), retrying in ${RETRY_DELAY_MS}ms...`);
+        await sleep(RETRY_DELAY_MS);
+      } else {
+        throw new Error(`start_stream failed: ${err.message}`);
+      }
+    }
+  }
 
   console.error(`[clawptt] Sending audio on stream ${streamId} to ${channel}`);
 
