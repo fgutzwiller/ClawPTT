@@ -1,8 +1,8 @@
-# PinchPTT
+# ClawPTT
 
 Zello Work voice bridge for OpenClaw. Connects push-to-talk radio to AI agents via real-time speech-to-speech processing.
 
-PinchPTT handles voice I/O only. All intelligence (model, tools, search, persona) lives in the agent behind the LLM endpoint.
+ClawPTT handles voice I/O only. All intelligence (model, tools, search, persona) lives in the agent behind the LLM endpoint.
 
 ## How it works
 
@@ -10,7 +10,7 @@ PinchPTT handles voice I/O only. All intelligence (model, tools, search, persona
 Zello PTT → Opus decode → faster-whisper STT → LLM → sherpa-onnx TTS → Opus encode → Zello PTT
 ```
 
-1. User presses PTT on Zello, audio streams to PinchPTT via WebSocket
+1. User presses PTT on Zello, audio streams to ClawPTT via WebSocket
 2. Opus frames decoded to PCM, transcribed by faster-whisper (persistent worker)
 3. Text sent to LLM (OpenClaw gateway or any OpenAI-compatible endpoint)
 4. Response converted to speech by sherpa-onnx/Piper TTS
@@ -30,8 +30,8 @@ Supports both channel broadcasts and direct messages.
 
 ```bash
 # 1. Clone and install
-git clone https://github.com/fgutzwiller/PinchPTT.git
-cd PinchPTT
+git clone https://github.com/fgutzwiller/ClawPTT.git
+cd ClawPTT
 npm install
 
 # 2. Set up Python dependencies
@@ -39,8 +39,8 @@ python3 -m venv .venv
 .venv/bin/pip install faster-whisper sherpa-onnx
 
 # 3. Download a TTS voice model
-mkdir -p ~/.pinchptt/tts/models
-cd ~/.pinchptt/tts/models
+mkdir -p ~/.clawptt/tts/models
+cd ~/.clawptt/tts/models
 curl -sL https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/vits-piper-en_US-lessac-high.tar.bz2 | tar xjf -
 
 # 4. Configure
@@ -85,7 +85,7 @@ For the `local` backend (any OpenAI-compatible API):
 | `WHISPER_MODEL` | Whisper model size: `base.en`, `small.en`, `medium.en`, `large-v3` |
 | `TTS_VOICE` | Piper voice: `en_US-lessac-high`, `en_US-hfc_male-medium`, `en_GB-alan-medium` |
 | `VENV_PYTHON` | Path to Python with faster-whisper + sherpa-onnx |
-| `SHERPA_ONNX_DIR` | TTS model directory (default: `~/.pinchptt/tts`) |
+| `SHERPA_ONNX_DIR` | TTS model directory (default: `~/.clawptt/tts`) |
 
 Browse all voices: https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models
 
@@ -98,20 +98,20 @@ Browse all voices: https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models
 2. Create a dedicated agent for voice, or use an existing one
 3. Set `OPENCLAW_AGENT` to the agent ID
 
-The agent controls which model, tools, and search providers are used. PinchPTT just sends text and speaks the response.
+The agent controls which model, tools, and search providers are used. ClawPTT just sends text and speaks the response.
 
 ## Running as a service
 
 ```bash
 # Create a systemd user service
-cat > ~/.config/systemd/user/pinchptt.service << 'EOF'
+cat > ~/.config/systemd/user/clawptt.service << 'EOF'
 [Unit]
-Description=PinchPTT Voice Bridge
+Description=ClawPTT Voice Bridge
 
 [Service]
 Type=simple
-ExecStart=/path/to/pinchptt/run.sh
-WorkingDirectory=/path/to/pinchptt
+ExecStart=/path/to/clawptt/run.sh
+WorkingDirectory=/path/to/clawptt
 Restart=on-failure
 RestartSec=10
 
@@ -120,7 +120,7 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
-systemctl --user enable --now pinchptt
+systemctl --user enable --now clawptt
 ```
 
 ## Troubleshooting

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ═══════════════════════════════════════════════════════════════════
-// PinchPTT — Voice Bridge for OpenClaw
+// ClawPTT — Voice Bridge for OpenClaw
 //
 // Connects to Zello Work via WebSocket, receives PTT voice streams,
 // transcribes them, routes to an LLM (local or cloud), TTS the
@@ -52,7 +52,7 @@ const STT_METHOD = process.env.STT_METHOD || "faster-whisper"; // "faster-whispe
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "base.en";
 
 // TTS config — Piper voices via sherpa-onnx Python package
-const SHERPA_ONNX_DIR = process.env.SHERPA_ONNX_DIR || `${process.env.HOME}/.pinchptt/tts`;
+const SHERPA_ONNX_DIR = process.env.SHERPA_ONNX_DIR || `${process.env.HOME}/.clawptt/tts`;
 const TTS_VOICE = process.env.TTS_VOICE || "en_US-lessac-high";
 const TTS_VOICE_DIR = `${SHERPA_ONNX_DIR}/models/vits-piper-${TTS_VOICE}`;
 const TTS_MODEL = process.env.TTS_MODEL || `${TTS_VOICE_DIR}/${TTS_VOICE}.onnx`;
@@ -69,15 +69,15 @@ const FRAME_DURATION_MS = 60;
 const FRAME_SIZE = (SAMPLE_RATE * FRAME_DURATION_MS) / 1000; // 960 samples per 60ms frame
 
 if (!ZELLO_NETWORK || !ZELLO_BOT_USER || !ZELLO_BOT_PASS) {
-  console.error("[pinchptt] Missing ZELLO_NETWORK, ZELLO_BOT_USER, or ZELLO_BOT_PASS");
+  console.error("[clawptt] Missing ZELLO_NETWORK, ZELLO_BOT_USER, or ZELLO_BOT_PASS");
   process.exit(1);
 }
 if (LLM_BACKEND === "openclaw" && !OPENCLAW_TOKEN) {
-  console.error("[pinchptt] Missing GATEWAY_TOKEN (required for openclaw backend)");
+  console.error("[clawptt] Missing GATEWAY_TOKEN (required for openclaw backend)");
   process.exit(1);
 }
 if (ZELLO_CHANNELS.length === 0) {
-  console.error("[pinchptt] No ZELLO_BRIDGE_CHANNELS configured (comma-separated channel names)");
+  console.error("[clawptt] No ZELLO_BRIDGE_CHANNELS configured (comma-separated channel names)");
   process.exit(1);
 }
 
@@ -105,7 +105,7 @@ function startSTTWorker() {
     for (const line of lines) {
       if (line === "READY") {
         sttReady = true;
-        console.error("[pinchptt] STT worker ready (model pre-loaded)");
+        console.error("[clawptt] STT worker ready (model pre-loaded)");
         continue;
       }
       // Resolve the oldest pending request
@@ -121,7 +121,7 @@ function startSTTWorker() {
   });
 
   sttWorker.on("close", (code) => {
-    console.error(`[pinchptt] STT worker exited (code ${code}), restarting...`);
+    console.error(`[clawptt] STT worker exited (code ${code}), restarting...`);
     sttReady = false;
     // Reject pending requests
     for (const resolve of sttQueue) resolve("");
@@ -159,11 +159,11 @@ function connectZello() {
     reconnectTimer = null;
   }
 
-  console.error(`[pinchptt] Connecting to ${ZELLO_WS_URL}...`);
+  console.error(`[clawptt] Connecting to ${ZELLO_WS_URL}...`);
   ws = new WebSocket(ZELLO_WS_URL);
 
   ws.on("open", () => {
-    console.error("[pinchptt] WebSocket connected, logging in...");
+    console.error("[clawptt] WebSocket connected, logging in...");
     const logonCmd = {
       command: "logon",
       seq: nextSeq(),
@@ -171,7 +171,7 @@ function connectZello() {
       password: ZELLO_BOT_PASS,
       channels: ZELLO_CHANNELS,
       listen_only: false,
-      platform_name: "PinchPTT Voice Bridge",
+      platform_name: "ClawPTT Voice Bridge",
     };
     if (refreshToken) {
       logonCmd.refresh_token = refreshToken;
@@ -188,12 +188,12 @@ function connectZello() {
   });
 
   ws.on("close", (code, reason) => {
-    console.error(`[pinchptt] WebSocket closed: ${code} ${reason}`);
+    console.error(`[clawptt] WebSocket closed: ${code} ${reason}`);
     scheduleReconnect();
   });
 
   ws.on("error", (err) => {
-    console.error(`[pinchptt] WebSocket error: ${err.message}`);
+    console.error(`[clawptt] WebSocket error: ${err.message}`);
   });
 
   ws.on("ping", () => {
@@ -204,7 +204,7 @@ function connectZello() {
 function scheduleReconnect() {
   if (reconnectTimer) return;
   const delay = 5000 + Math.random() * 5000;
-  console.error(`[pinchptt] Reconnecting in ${Math.round(delay / 1000)}s...`);
+  console.error(`[clawptt] Reconnecting in ${Math.round(delay / 1000)}s...`);
   reconnectTimer = setTimeout(connectZello, delay);
 }
 
@@ -220,10 +220,10 @@ function handleJsonFrame(raw) {
   // Logon response
   if (msg.seq && msg.success !== undefined) {
     if (msg.success) {
-      console.error(`[pinchptt] Logged in as ${ZELLO_BOT_USER} on channels: ${ZELLO_CHANNELS.join(", ")}`);
+      console.error(`[clawptt] Logged in as ${ZELLO_BOT_USER} on channels: ${ZELLO_CHANNELS.join(", ")}`);
       if (msg.refresh_token) refreshToken = msg.refresh_token;
     } else {
-      console.error(`[pinchptt] Login failed: ${msg.error || "unknown"}`);
+      console.error(`[clawptt] Login failed: ${msg.error || "unknown"}`);
       scheduleReconnect();
     }
     return;
@@ -231,7 +231,7 @@ function handleJsonFrame(raw) {
 
   // Log all events for debugging
   if (msg.type || msg.command) {
-    console.error(`[pinchptt] Event: ${JSON.stringify(msg)}`);
+    console.error(`[clawptt] Event: ${JSON.stringify(msg)}`);
   }
 
   const event = msg.command || msg.type;
@@ -249,11 +249,11 @@ function handleJsonFrame(raw) {
       break;
 
     case "on_channel_status":
-      console.error(`[pinchptt] Channel ${msg.channel}: ${msg.users_online} users online`);
+      console.error(`[clawptt] Channel ${msg.channel}: ${msg.users_online} users online`);
       break;
 
     case "on_error":
-      console.error(`[pinchptt] Zello error: ${msg.error}`);
+      console.error(`[clawptt] Zello error: ${msg.error}`);
       break;
   }
 }
@@ -269,7 +269,7 @@ function handleStreamStart(msg) {
   // Don't process our own streams
   if (user === ZELLO_BOT_USER) return;
 
-  console.error(`[pinchptt] Stream start: ${user} on ${isDM ? "DM" : msg.channel} (stream ${msg.stream_id})`);
+  console.error(`[clawptt] Stream start: ${user} on ${isDM ? "DM" : msg.channel} (stream ${msg.stream_id})`);
   activeStreams.set(msg.stream_id, {
     user: user,
     channel: replyTo,
@@ -286,7 +286,7 @@ function handleTranscription(msg) {
   const stream = activeStreams.get(msg.stream_id);
   if (stream) {
     stream.transcription = msg.text;
-    console.error(`[pinchptt] Transcription (stream ${msg.stream_id}): "${msg.text}"`);
+    console.error(`[clawptt] Transcription (stream ${msg.stream_id}): "${msg.text}"`);
   }
 }
 
@@ -297,13 +297,13 @@ async function handleStreamStop(msg) {
 
   const durationMs = Date.now() - stream.startedAt;
   console.error(
-    `[pinchptt] Stream stop: ${stream.user} on ${stream.channel} — ` +
+    `[clawptt] Stream stop: ${stream.user} on ${stream.channel} — ` +
     `${stream.packets.length} packets, ${Math.round(durationMs / 1000)}s`
   );
 
   // Skip very short transmissions (< 0.5s, likely key-ups)
   if (durationMs < 500 || stream.packets.length < 3) {
-    console.error("[pinchptt] Skipping short transmission");
+    console.error("[clawptt] Skipping short transmission");
     return;
   }
 
@@ -317,26 +317,26 @@ async function handleStreamStop(msg) {
     }
 
     if (!text || text.trim().length === 0) {
-      console.error("[pinchptt] Empty transcription, skipping");
+      console.error("[clawptt] Empty transcription, skipping");
       return;
     }
 
-    console.error(`[pinchptt] Transcribed from ${stream.user}: "${text}"`);
+    console.error(`[clawptt] Transcribed from ${stream.user}: "${text}"`);
 
     // Step 2: Send to OpenClaw agent
     const response = await sendToAgent(text, stream.user, stream.channel);
-    console.error(`[pinchptt] Agent response (${response.length} chars): "${response.slice(0, 100)}..."`);
+    console.error(`[clawptt] Agent response (${response.length} chars): "${response.slice(0, 100)}..."`);
 
     // Step 3: Sanitize and TTS the response
     const cleaned = sanitizeForTTS(response);
-    console.error(`[pinchptt] Sanitized (${cleaned.length} chars): "${cleaned.slice(0, 100)}..."`);
+    console.error(`[clawptt] Sanitized (${cleaned.length} chars): "${cleaned.slice(0, 100)}..."`);
     const wavPath = await textToSpeech(cleaned);
 
     // Step 4: Encode to Opus and send to Zello
     await sendAudioToZello(wavPath, stream.channel);
     await unlink(wavPath).catch(() => {});
   } catch (err) {
-    console.error(`[pinchptt] Error processing stream: ${err.message}`);
+    console.error(`[clawptt] Error processing stream: ${err.message}`);
   }
 }
 
@@ -472,7 +472,7 @@ async function sendToLocalLLM(text) {
 
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content || "(no response)";
-  console.error(`[pinchptt] Local LLM (${Date.now() - t0}ms): ${content.slice(0, 100)}`);
+  console.error(`[clawptt] Local LLM (${Date.now() - t0}ms): ${content.slice(0, 100)}`);
   return content;
 }
 
@@ -502,7 +502,7 @@ async function sendToOpenClaw(text, zelloUser, zelloChannel) {
 
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content || "(no response)";
-  console.error(`[pinchptt] OpenClaw (${Date.now() - t0}ms): ${content.slice(0, 100)}`);
+  console.error(`[clawptt] OpenClaw (${Date.now() - t0}ms): ${content.slice(0, 100)}`);
   return content;
 }
 
@@ -599,7 +599,7 @@ async function sendAudioToZello(wavPath, channel) {
     ws.send(JSON.stringify(startCmd));
   });
 
-  console.error(`[pinchptt] Sending audio on stream ${streamId} to ${channel}`);
+  console.error(`[clawptt] Sending audio on stream ${streamId} to ${channel}`);
 
   // Send Opus frames at the correct cadence
   const bytesPerFrame = FRAME_SIZE * 2; // 16-bit = 2 bytes per sample
@@ -631,7 +631,7 @@ async function sendAudioToZello(wavPath, channel) {
     channel,
   }));
 
-  console.error(`[pinchptt] Audio sent: ${packetId} packets to ${channel}`);
+  console.error(`[clawptt] Audio sent: ${packetId} packets to ${channel}`);
 }
 
 // ─── Utilities ────────────────────────────────────────────────────
@@ -665,7 +665,7 @@ process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
 function shutdown() {
-  console.error("[pinchptt] Shutting down...");
+  console.error("[clawptt] Shutting down...");
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.close(1000, "bridge shutdown");
   }
@@ -674,7 +674,7 @@ function shutdown() {
 
 // ─── Start ────────────────────────────────────────────────────────
 console.error("═══════════════════════════════════════════════════");
-console.error("  PinchPTT — Voice Bridge for OpenClaw");
+console.error("  ClawPTT — Voice Bridge for OpenClaw");
 console.error(`  Network:  ${ZELLO_NETWORK}`);
 console.error(`  Bot user: ${ZELLO_BOT_USER}`);
 console.error(`  Channels: ${ZELLO_CHANNELS.join(", ")}`);

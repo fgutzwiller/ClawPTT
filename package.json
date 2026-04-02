@@ -1,7 +1,7 @@
 {
-  "name": "pinchptt",
+  "name": "clawptt",
   "version": "1.0.0",
-  "description": "PinchPTT — Zello Work voice bridge for OpenClaw AI agents",
+  "description": "ClawPTT — Zello Work voice bridge for OpenClaw AI agents",
   "type": "module",
   "main": "bridge.js",
   "scripts": {
