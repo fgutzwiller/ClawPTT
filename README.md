@@ -4,23 +4,60 @@
 
 # ClawPTT
 
-Zello Work voice bridge for OpenClaw. Connects push-to-talk radio to AI agents via real-time speech-to-speech processing.
+Zello Work voice bridge and REST API for OpenClaw. Connects push-to-talk radio to AI agents via real-time speech-to-speech processing, and exposes the Zello Work admin/data API as HTTP endpoints.
 
-ClawPTT handles voice I/O only. All intelligence (model, tools, search, persona) lives in the agent behind the LLM endpoint.
-
-## How it works
+## Architecture
 
 ```
-Zello PTT → Opus decode → faster-whisper STT → LLM → sherpa-onnx TTS → Opus encode → Zello PTT
+┌──────────────────────────────────────────────────────────────────────┐
+│ ClawPTT (single Node.js process)                                      │
+│                                                                        │
+│  bridge.js ─── Voice Bridge (WebSocket streaming API)                  │
+│  │  Zello PTT → Opus → PCM → Whisper STT → LLM → TTS → Opus → Zello │
+│  │  Conversation history (rolling buffer, 10 turns, 5min TTL)         │
+│  │  Retry logic: 6 attempts, exponential backoff for start_stream     │
+│  │                                                                     │
+│  ├── api.js ── REST API server (port 18790)                           │
+│  │   Uses zello.js for all Zello Work admin/data operations           │
+│  │   Users, channels, locations, history, media, roles                │
+│  │                                                                     │
+│  └── zello.js ─ ZelloAPI class (REST client)                          │
+│      Session auth, auto-reauth, all Zello Work REST endpoints         │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-1. User presses PTT on Zello, audio streams to ClawPTT via WebSocket
+### Voice bridge (bridge.js)
+
+1. User presses PTT on Zello, audio streams via WebSocket
 2. Opus frames decoded to PCM, transcribed by faster-whisper (persistent worker)
 3. Text sent to LLM (OpenClaw gateway or any OpenAI-compatible endpoint)
 4. Response converted to speech by sherpa-onnx/Piper TTS
 5. Audio streamed back to Zello
 
-Supports both channel broadcasts and direct messages.
+Supports channel broadcasts, direct messages, and per-channel conversation history.
+
+### REST API (api.js + zello.js)
+
+Runs in-process with the voice bridge on port 18790. Single Zello session shared across all callers.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/users` | GET/POST/DELETE | List, create, delete users |
+| `/channels` | GET/POST/DELETE | List, create, delete channels |
+| `/channels/members` | POST/DELETE | Add/remove channel members |
+| `/contacts` | POST/DELETE | Add/remove user contacts |
+| `/roles` | GET/POST/DELETE | Channel roles |
+| `/roles/assign` | POST | Assign users to roles |
+| `/locations` | GET | GPS locations (bounding box or all active) |
+| `/locations/user` | GET | Per-user location and history (GeoJSON) |
+| `/history` | GET | Message history metadata |
+| `/media` | GET | Media download URLs (voice MP3, image JPG) |
+| `/session/refresh` | POST | Refresh Zello API session |
+
+Auth: `Authorization: Bearer <token>` (defaults to `GATEWAY_TOKEN`).
+
+Activates when `ZELLO_API_KEY` is set in the environment. Without it, only the voice bridge runs.
 
 ## Prerequisites
 
@@ -40,7 +77,7 @@ npm install
 
 # 2. Set up Python dependencies
 python3 -m venv .venv
-.venv/bin/pip install faster-whisper sherpa-onnx
+.venv/bin/pip install faster-whisper sherpa-onnx numpy
 
 # 3. Download a TTS voice model
 mkdir -p ~/.clawptt/tts/models
@@ -57,7 +94,7 @@ VENV_PYTHON=.venv/bin/python3 ./run.sh
 
 ## Configuration
 
-Copy `.env.example` to `.env` and set your values. Key settings:
+Copy `.env.example` to `.env` and set your values.
 
 ### Zello Work
 | Variable | Description |
@@ -66,6 +103,15 @@ Copy `.env.example` to `.env` and set your values. Key settings:
 | `ZELLO_BOT_USER` | Bot username |
 | `ZELLO_BOT_PASS` | Bot password |
 | `ZELLO_BRIDGE_CHANNELS` | Channels to join (comma-separated) |
+
+### Zello REST API
+| Variable | Description |
+|----------|-------------|
+| `ZELLO_API_KEY` | API key from Zello admin console (enables the REST API) |
+| `ZELLO_ADMIN_USER` | Admin username (falls back to `ZELLO_BOT_USER`) |
+| `ZELLO_ADMIN_PASS` | Admin password (falls back to `ZELLO_BOT_PASS`) |
+| `CLAWPTT_API_PORT` | REST API port (default: `18790`) |
+| `CLAWPTT_API_TOKEN` | API auth token (default: `GATEWAY_TOKEN`) |
 
 ### LLM Backend
 | Variable | Description |
@@ -82,6 +128,12 @@ For the `local` backend (any OpenAI-compatible API):
 | `LOCAL_LLM_API_KEY` | API key |
 | `LOCAL_LLM_MODEL` | Model ID |
 | `AGENT_SYSTEM_PROMPT` | System prompt for the local model |
+
+### Conversation History
+| Variable | Description |
+|----------|-------------|
+| `HISTORY_MAX_TURNS` | Max conversation turns to retain (default: `10`) |
+| `HISTORY_TTL_MS` | History TTL in milliseconds (default: `300000` / 5 min) |
 
 ### STT / TTS
 | Variable | Description |
@@ -107,10 +159,11 @@ The agent controls which model, tools, and search providers are used. ClawPTT ju
 ## Running as a service
 
 ```bash
-# Create a systemd user service
 cat > ~/.config/systemd/user/clawptt.service << 'EOF'
 [Unit]
 Description=ClawPTT Voice Bridge
+After=openclaw-gateway.service
+Wants=openclaw-gateway.service
 
 [Service]
 Type=simple
@@ -127,15 +180,14 @@ systemctl --user daemon-reload
 systemctl --user enable --now clawptt
 ```
 
-## Troubleshooting
+## Detailed setup
 
-**Bridge won't connect to Zello** — Verify credentials. The bot user must be a member of the configured channels. Channels must be in the user's contact list (join from the Zello app first).
-
-**403 from OpenClaw** — Ensure `gateway.http.endpoints.chatCompletions.enabled` is `true` and your gateway version supports it (>= 2026.3.31).
-
-**No audio response** — Check that the TTS voice model is downloaded and `VENV_PYTHON` points to a Python with `sherpa-onnx` installed.
-
-**High latency** — Use a smaller Whisper model (`base.en`), a local LLM, or both. The persistent STT worker avoids model reload overhead.
+See [docs/INSTALLATION.md](docs/INSTALLATION.md) for:
+- Step-by-step Zello Work configuration
+- Agent design for voice
+- Model and latency recommendations
+- Search and tool configuration
+- Production deployment
 
 ## License
 

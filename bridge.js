@@ -18,6 +18,7 @@ import { writeFile, unlink, readFile } from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import crypto from "crypto";
+import { startAPI, getAPI } from "./api.js";
 
 // ─── Configuration ─────────────────────────────────────────────────
 const ZELLO_NETWORK = process.env.ZELLO_NETWORK;
@@ -46,6 +47,30 @@ const LOCAL_LLM_TEMPERATURE = parseFloat(process.env.LOCAL_LLM_TEMPERATURE || "0
 // ─── Agent Persona ────────────────────────────────────────────────
 const AGENT_SYSTEM_PROMPT = process.env.AGENT_SYSTEM_PROMPT ||
   "You are a concise voice assistant on a Zello PTT radio channel. Keep responses short and spoken-word friendly. No markdown, no bullet points, no special characters. Respond as if speaking on a radio.";
+
+// ─── Conversation History (rolling buffer per channel) ──────────
+const HISTORY_MAX_TURNS = parseInt(process.env.HISTORY_MAX_TURNS || "10", 10);
+const HISTORY_TTL_MS = parseInt(process.env.HISTORY_TTL_MS || "300000", 10); // 5 min
+const channelHistory = new Map(); // channel → { messages: [], lastActivity: Date.now() }
+
+function getHistory(channel) {
+  const entry = channelHistory.get(channel);
+  if (!entry || (Date.now() - entry.lastActivity > HISTORY_TTL_MS)) {
+    channelHistory.set(channel, { messages: [], lastActivity: Date.now() });
+    return channelHistory.get(channel);
+  }
+  entry.lastActivity = Date.now();
+  return entry;
+}
+
+function pushHistory(channel, role, content) {
+  const entry = getHistory(channel);
+  entry.messages.push({ role, content });
+  // Keep only last N turns (N user + N assistant = 2N messages)
+  while (entry.messages.length > HISTORY_MAX_TURNS * 2) {
+    entry.messages.shift();
+  }
+}
 
 // STT config
 const STT_METHOD = process.env.STT_METHOD || "faster-whisper"; // "faster-whisper" or "zello-transcription"
@@ -479,11 +504,14 @@ async function sendToLocalLLM(text) {
 async function sendToOpenClaw(text, zelloUser, zelloChannel) {
   const t0 = Date.now();
   const url = `${OPENCLAW_GATEWAY}/v1/chat/completions`;
+
+  // Build messages with conversation history
+  const history = getHistory(zelloChannel || "default");
+  pushHistory(zelloChannel || "default", "user", text);
+
   const body = {
     model: `openclaw:${OPENCLAW_AGENT}`,
-    messages: [
-      { role: "user", content: text },
-    ],
+    messages: [...history.messages],
   };
 
   const res = await fetch(url, {
@@ -502,6 +530,7 @@ async function sendToOpenClaw(text, zelloUser, zelloChannel) {
 
   const data = await res.json();
   const content = data.choices?.[0]?.message?.content || "(no response)";
+  pushHistory(zelloChannel || "default", "assistant", content);
   console.error(`[clawptt] OpenClaw (${Date.now() - t0}ms): ${content.slice(0, 100)}`);
   return content;
 }
@@ -566,8 +595,8 @@ async function sendAudioToZello(wavPath, channel) {
   const codecHeader = "gD4BPA==";
 
   // Start stream (with retry for DMs where the channel may not be ready immediately)
-  const MAX_START_RETRIES = 3;
-  const RETRY_DELAY_MS = 2000;
+  const MAX_START_RETRIES = 6;
+  const RETRY_DELAY_MS = 1500;
   let streamId;
 
   for (let attempt = 1; attempt <= MAX_START_RETRIES; attempt++) {
@@ -606,9 +635,10 @@ async function sendAudioToZello(wavPath, channel) {
       });
       break; // success
     } catch (err) {
-      if (attempt < MAX_START_RETRIES && err.message.includes("not ready")) {
-        console.error(`[clawptt] start_stream attempt ${attempt} failed (${err.message}), retrying in ${RETRY_DELAY_MS}ms...`);
-        await sleep(RETRY_DELAY_MS);
+      if (attempt < MAX_START_RETRIES && (err.message.includes("not ready") || err.message.includes("timeout"))) {
+        const backoff = RETRY_DELAY_MS * Math.pow(1.5, attempt - 1);
+        console.error(`[clawptt] start_stream attempt ${attempt} failed (${err.message}), retrying in ${Math.round(backoff)}ms...`);
+        await sleep(backoff);
       } else {
         throw new Error(`start_stream failed: ${err.message}`);
       }
@@ -701,3 +731,8 @@ console.error(`  TTS:      ${TTS_VOICE}`);
 console.error("═══════════════════════════════════════════════════");
 
 connectZello();
+
+// Start the Zello REST API server (same process, shared session)
+if (process.env.ZELLO_API_KEY) {
+  startAPI().catch((err) => console.error(`[clawptt-api] Failed to start: ${err.message}`));
+}
