@@ -2,11 +2,11 @@
 // ═══════════════════════════════════════════════════════════════════
 // ClawPTT — Voice Bridge for OpenClaw
 //
-// Connects to Zello Work via WebSocket, receives PTT voice streams,
-// transcribes them, routes to an LLM (local or cloud), TTS the
-// response, and transmits audio back to Zello.
+// Connects to Zello Work via WebSocket, receives PTT transcriptions,
+// routes to an LLM (local or cloud), TTS the response, and
+// transmits audio back to Zello.
 //
-// Flow: Zello PTT → Opus → PCM → Whisper STT → LLM
+// Flow: Zello PTT → text (server-side STT) → LLM
 //       → TTS → Opus → Zello PTT
 // ═══════════════════════════════════════════════════════════════════
 
@@ -72,10 +72,6 @@ function pushHistory(channel, role, content) {
   }
 }
 
-// STT config
-const STT_METHOD = process.env.STT_METHOD || "faster-whisper"; // "faster-whisper" or "zello-transcription"
-const WHISPER_MODEL = process.env.WHISPER_MODEL || "base.en";
-
 // TTS config — Piper voices via sherpa-onnx Python package
 const SHERPA_ONNX_DIR = process.env.SHERPA_ONNX_DIR || `${process.env.HOME}/.clawptt/tts`;
 const TTS_VOICE = process.env.TTS_VOICE || "en_US-lessac-high";
@@ -106,91 +102,11 @@ if (ZELLO_CHANNELS.length === 0) {
   process.exit(1);
 }
 
-// ─── Opus Encoder/Decoder ──────────────────────────────────────────
-const opusDecoder = new OpusEncoder(SAMPLE_RATE, CHANNELS);
+// ─── Opus Encoder (outbound only) ─────────────────────────────────
 const opusEncoder = new OpusEncoder(SAMPLE_RATE, CHANNELS);
 
-// ─── Persistent STT Worker ─────────────────────────────────────────
-let sttWorker = null;
-let sttReady = false;
-let sttQueue = []; // pending resolve callbacks
-let sttConsecutiveFailures = 0;
-const STT_MAX_BACKOFF_MS = 60000; // cap at 60s
-
-function startSTTWorker() {
-  const workerScript = new URL("./stt-worker.py", import.meta.url).pathname;
-  sttWorker = spawn(VENV_PYTHON, [workerScript], {
-    stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, WHISPER_MODEL },
-  });
-
-  sttWorker.on("error", (err) => {
-    console.error(`[clawptt] STT worker failed to start: ${err.message}`);
-    if (err.code === "ENOENT") {
-      console.error(`[clawptt] Python not found at: ${VENV_PYTHON}`);
-      console.error(`[clawptt] Set VENV_PYTHON to a Python 3 binary with faster-whisper installed`);
-    }
-  });
-
-  let lineBuf = "";
-  sttWorker.stdout.on("data", (chunk) => {
-    lineBuf += chunk.toString();
-    let lines = lineBuf.split("\n");
-    lineBuf = lines.pop(); // keep incomplete line
-    for (const line of lines) {
-      if (line === "READY") {
-        sttReady = true;
-        sttConsecutiveFailures = 0;
-        console.error("[clawptt] STT worker ready (model pre-loaded)");
-        continue;
-      }
-      // Resolve the oldest pending request
-      if (sttQueue.length > 0) {
-        const resolve = sttQueue.shift();
-        resolve(line);
-      }
-    }
-  });
-
-  sttWorker.stderr.on("data", (d) => {
-    const msg = d.toString().trim();
-    // Detect missing Python dependencies on first failure
-    if (msg.includes("ModuleNotFoundError") && sttConsecutiveFailures === 0) {
-      console.error(`[clawptt] STT dependency missing. Install: ${VENV_PYTHON} -m pip install faster-whisper`);
-    }
-    console.error(`[stt] ${msg}`);
-  });
-
-  sttWorker.on("close", (code) => {
-    sttReady = false;
-    sttConsecutiveFailures++;
-    // Reject pending requests
-    for (const resolve of sttQueue) resolve("");
-    sttQueue = [];
-
-    const backoff = Math.min(1000 * Math.pow(2, sttConsecutiveFailures - 1), STT_MAX_BACKOFF_MS);
-    if (sttConsecutiveFailures <= 3) {
-      console.error(`[clawptt] STT worker exited (code ${code}), restarting in ${backoff / 1000}s...`);
-    } else if (sttConsecutiveFailures === 4) {
-      console.error(`[clawptt] STT worker failed ${sttConsecutiveFailures} times — check Python environment (VENV_PYTHON=${VENV_PYTHON})`);
-      console.error(`[clawptt] Continuing to retry with ${backoff / 1000}s backoff (voice transcription unavailable)`);
-    }
-    // Keep retrying but with exponential backoff capped at 60s
-    setTimeout(startSTTWorker, backoff);
-  });
-}
-
-function sttTranscribe(wavPath) {
-  return new Promise((resolve) => {
-    sttQueue.push(resolve);
-    sttWorker.stdin.write(wavPath + "\n");
-  });
-}
-
-startSTTWorker();
-
 // ─── Active Streams ────────────────────────────────────────────────
-// Track incoming voice streams: streamId → { user, channel, packets[], transcription? }
+// Track incoming voice streams: streamId → { user, channel, transcription }
 const activeStreams = new Map();
 
 // ─── Zello WebSocket Connection ────────────────────────────────────
@@ -230,11 +146,10 @@ function connectZello() {
   });
 
   ws.on("message", (data, isBinary) => {
-    if (isBinary) {
-      handleBinaryFrame(data);
-    } else {
+    if (!isBinary) {
       handleJsonFrame(data.toString());
     }
+    // Binary frames (Opus audio) are ignored — inbound uses Zello server-side transcription
   });
 
   ws.on("close", (code, reason) => {
@@ -323,10 +238,6 @@ function handleStreamStart(msg) {
   activeStreams.set(msg.stream_id, {
     user: user,
     channel: replyTo,
-    codec: msg.codec,
-    codecHeader: msg.codec_header,
-    packetDuration: msg.packet_duration,
-    packets: [],
     transcription: null,
     startedAt: Date.now(),
   });
@@ -347,31 +258,25 @@ async function handleStreamStop(msg) {
 
   const durationMs = Date.now() - stream.startedAt;
   console.error(
-    `[clawptt] Stream stop: ${stream.user} on ${stream.channel} — ` +
-    `${stream.packets.length} packets, ${Math.round(durationMs / 1000)}s`
+    `[clawptt] Stream stop: ${stream.user} on ${stream.channel} — ${Math.round(durationMs / 1000)}s`
   );
 
   // Skip very short transmissions (< 0.5s, likely key-ups)
-  if (durationMs < 500 || stream.packets.length < 3) {
+  if (durationMs < 500) {
     console.error("[clawptt] Skipping short transmission");
     return;
   }
 
+  // Zello delivers transcription via on_transcription events
+  const text = stream.transcription;
+  if (!text || text.trim().length === 0) {
+    console.error("[clawptt] No transcription received, skipping");
+    return;
+  }
+
+  console.error(`[clawptt] From ${stream.user}: "${text}"`);
+
   try {
-    // Step 1: Get transcription
-    let text;
-    if (stream.transcription && STT_METHOD === "zello-transcription") {
-      text = stream.transcription;
-    } else {
-      text = await transcribeAudio(stream);
-    }
-
-    if (!text || text.trim().length === 0) {
-      console.error("[clawptt] Empty transcription, skipping");
-      return;
-    }
-
-    console.error(`[clawptt] Transcribed from ${stream.user}: "${text}"`);
 
     // Step 2: Send to OpenClaw agent
     const response = await sendToAgent(text, stream.user, stream.channel);
@@ -428,62 +333,6 @@ function sanitizeForTTS(text) {
   s = s.trim();
 
   return s;
-}
-
-// ─── Binary Frame Handler ─────────────────────────────────────────
-function handleBinaryFrame(buf) {
-  if (buf.length < 9) return;
-
-  const type = buf.readUInt8(0);
-  if (type !== 0x01) return; // Only handle audio packets
-
-  const streamId = buf.readUInt32BE(1);
-  const packetId = buf.readUInt32BE(5);
-  const opusData = buf.slice(9);
-
-  const stream = activeStreams.get(streamId);
-  if (stream) {
-    stream.packets.push({ packetId, data: opusData });
-  }
-}
-
-// ─── Speech-to-Text ───────────────────────────────────────────────
-async function transcribeAudio(stream) {
-  // Decode all Opus packets to PCM
-  const pcmChunks = [];
-  for (const pkt of stream.packets) {
-    try {
-      const decoded = opusDecoder.decode(pkt.data);
-      pcmChunks.push(decoded);
-    } catch (err) {
-      // Skip corrupted packets
-    }
-  }
-
-  if (pcmChunks.length === 0) return null;
-
-  // Concatenate PCM (16-bit signed LE, 16kHz mono)
-  const totalLen = pcmChunks.reduce((sum, c) => sum + c.length, 0);
-  const pcm = Buffer.concat(pcmChunks, totalLen);
-
-  // Write as raw PCM, then convert to WAV with ffmpeg
-  const id = crypto.randomBytes(4).toString("hex");
-  const pcmPath = join(tmpdir(), `zello-bridge-${id}.pcm`);
-  const wavPath = join(tmpdir(), `zello-bridge-${id}.wav`);
-
-  await writeFile(pcmPath, pcm);
-
-  // Convert raw PCM to WAV
-  await execAsync("ffmpeg", [
-    "-f", "s16le", "-ar", String(SAMPLE_RATE), "-ac", "1",
-    "-i", pcmPath, "-y", wavPath,
-  ]);
-  await unlink(pcmPath).catch(() => {});
-
-  // Transcribe with persistent STT worker
-  const text = await sttTranscribe(wavPath);
-  await unlink(wavPath).catch(() => {});
-  return text.trim();
 }
 
 // ─── LLM Communication ───────────────────────────────────────────
@@ -751,7 +600,7 @@ console.error(`  Bot user: ${ZELLO_BOT_USER}`);
 console.error(`  Channels: ${ZELLO_CHANNELS.join(", ")}`);
 const llmLabel = LLM_BACKEND === "local" ? `local (${LOCAL_LLM_MODEL})` : `openclaw (${OPENCLAW_AGENT})`;
 console.error(`  LLM:      ${llmLabel}`);
-console.error(`  STT:      ${STT_METHOD} (persistent worker)`);
+console.error(`  STT:      Zello server-side transcription`);
 console.error(`  TTS:      ${TTS_VOICE}`);
 console.error("═══════════════════════════════════════════════════");
 

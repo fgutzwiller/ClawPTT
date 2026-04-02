@@ -64,9 +64,9 @@ Activates when `ZELLO_API_KEY` is set in the environment. Without it, only the v
 ## Prerequisites
 
 - **Node.js** >= 18
-- **Python 3** with `faster-whisper` and `sherpa-onnx` packages
-- **ffmpeg**
-- A **Zello Work** network with API access
+- **Python 3** with `sherpa-onnx` package (for TTS)
+- **ffmpeg** (for TTS audio conversion)
+- A **Zello Work** network with API access and transcription enabled
 - An LLM endpoint: **OpenClaw** gateway or any OpenAI-compatible API
 
 ## Quick start
@@ -77,9 +77,9 @@ git clone https://github.com/fgutzwiller/ClawPTT.git
 cd ClawPTT
 npm install
 
-# 2. Set up Python dependencies
+# 2. Set up Python dependencies (TTS only)
 python3 -m venv .venv
-.venv/bin/pip install faster-whisper sherpa-onnx numpy
+.venv/bin/pip install sherpa-onnx numpy
 
 # 3. Download a TTS voice model
 mkdir -p ~/.clawptt/tts/models
@@ -137,12 +137,11 @@ For the `local` backend (any OpenAI-compatible API):
 | `HISTORY_MAX_TURNS` | Max conversation turns to retain (default: `10`) |
 | `HISTORY_TTL_MS` | History TTL in milliseconds (default: `300000` / 5 min) |
 
-### STT / TTS
+### TTS (outbound voice)
 | Variable | Description |
 |----------|-------------|
-| `WHISPER_MODEL` | Whisper model size: `base.en`, `small.en`, `medium.en`, `large-v3` |
 | `TTS_VOICE` | Piper voice: `en_US-lessac-high`, `en_US-hfc_male-medium`, `en_GB-alan-medium` |
-| `VENV_PYTHON` | Path to Python with faster-whisper + sherpa-onnx |
+| `VENV_PYTHON` | Path to Python with sherpa-onnx |
 | `SHERPA_ONNX_DIR` | TTS model directory (default: `~/.clawptt/tts`) |
 
 Browse all voices: https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models

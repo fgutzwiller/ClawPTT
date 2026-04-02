@@ -112,9 +112,11 @@ Understanding what belongs where is critical for a clean deployment.
 ### System requirements
 
 - **Node.js** >= 18 (22+ recommended for native Opus bindings)
-- **Python 3.10+** with pip
-- **ffmpeg** (for PCM/WAV conversion)
+- **Python 3.10+** with pip (for TTS only — `sherpa-onnx` package)
+- **ffmpeg** (for TTS audio conversion)
 - **OpenClaw** >= 2026.3.31 (with `chatCompletions` HTTP endpoint)
+
+Inbound speech-to-text is handled by Zello's server-side transcription — no local STT model needed.
 
 ### Zello Work
 
@@ -414,7 +416,7 @@ Create a dedicated venv with the STT and TTS packages:
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install faster-whisper sherpa-onnx numpy
+.venv/bin/pip install sherpa-onnx numpy
 ```
 
 ### 3. Download a TTS voice model
