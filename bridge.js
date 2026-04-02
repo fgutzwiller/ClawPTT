@@ -114,12 +114,22 @@ const opusEncoder = new OpusEncoder(SAMPLE_RATE, CHANNELS);
 let sttWorker = null;
 let sttReady = false;
 let sttQueue = []; // pending resolve callbacks
+let sttConsecutiveFailures = 0;
+const STT_MAX_BACKOFF_MS = 60000; // cap at 60s
 
 function startSTTWorker() {
   const workerScript = new URL("./stt-worker.py", import.meta.url).pathname;
   sttWorker = spawn(VENV_PYTHON, [workerScript], {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, WHISPER_MODEL },
+  });
+
+  sttWorker.on("error", (err) => {
+    console.error(`[clawptt] STT worker failed to start: ${err.message}`);
+    if (err.code === "ENOENT") {
+      console.error(`[clawptt] Python not found at: ${VENV_PYTHON}`);
+      console.error(`[clawptt] Set VENV_PYTHON to a Python 3 binary with faster-whisper installed`);
+    }
   });
 
   let lineBuf = "";
@@ -130,6 +140,7 @@ function startSTTWorker() {
     for (const line of lines) {
       if (line === "READY") {
         sttReady = true;
+        sttConsecutiveFailures = 0;
         console.error("[clawptt] STT worker ready (model pre-loaded)");
         continue;
       }
@@ -142,16 +153,30 @@ function startSTTWorker() {
   });
 
   sttWorker.stderr.on("data", (d) => {
-    console.error(`[stt] ${d.toString().trim()}`);
+    const msg = d.toString().trim();
+    // Detect missing Python dependencies on first failure
+    if (msg.includes("ModuleNotFoundError") && sttConsecutiveFailures === 0) {
+      console.error(`[clawptt] STT dependency missing. Install: ${VENV_PYTHON} -m pip install faster-whisper`);
+    }
+    console.error(`[stt] ${msg}`);
   });
 
   sttWorker.on("close", (code) => {
-    console.error(`[clawptt] STT worker exited (code ${code}), restarting...`);
     sttReady = false;
+    sttConsecutiveFailures++;
     // Reject pending requests
     for (const resolve of sttQueue) resolve("");
     sttQueue = [];
-    setTimeout(startSTTWorker, 1000);
+
+    const backoff = Math.min(1000 * Math.pow(2, sttConsecutiveFailures - 1), STT_MAX_BACKOFF_MS);
+    if (sttConsecutiveFailures <= 3) {
+      console.error(`[clawptt] STT worker exited (code ${code}), restarting in ${backoff / 1000}s...`);
+    } else if (sttConsecutiveFailures === 4) {
+      console.error(`[clawptt] STT worker failed ${sttConsecutiveFailures} times — check Python environment (VENV_PYTHON=${VENV_PYTHON})`);
+      console.error(`[clawptt] Continuing to retry with ${backoff / 1000}s backoff (voice transcription unavailable)`);
+    }
+    // Keep retrying but with exponential backoff capped at 60s
+    setTimeout(startSTTWorker, backoff);
   });
 }
 
