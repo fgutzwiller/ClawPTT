@@ -61,56 +61,51 @@ Text in, audio out. The voice agent can check weather, pull calendar events, sea
 ClawPTT is the voice transport layer in a three-tier stack:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     Zello Work Network                        │
-│              (PTT radio — phones, desktops, radios)           │
-└──────────┬──────────────────────────────────────┬────────────┘
-           │ Inbound: text                        │ Outbound: Opus audio
-           │ (Zello server-side transcription      │ (TTS → Opus encode → stream)
-           │  or Opus → local Whisper STT)         │
-┌──────────▼──────────────────────────────────────▼────────────┐
-│                      ClawPTT                                  │
-│                                                               │
-│   Inbound (two modes):                                        │
-│   • Zello transcription (default) — text delivered by Zello   │
-│   • Local Whisper STT (fallback) — Opus decode → PCM → WAV   │
-│                                                               │
-│   Outbound:                                                   │
-│   • Text-to-speech (sherpa-onnx / Piper voices)               │
-│   • Opus encode (@discordjs/opus) → stream to Zello           │
-│                                                               │
-│   Also:                                                       │
-│   • Text sanitization (markdown → spoken word)                │
-│   • Conversation history (rolling buffer per channel)         │
-│   • Zello REST API (admin/data, port 18790)                   │
-│   • DM and channel support                                    │
-│                                                               │
-│   Does NOT handle: model selection, tools, search, persona    │
-└──────────────────────┬───────────────────────────────────────┘
-                       │ HTTP (OpenAI-compatible chat/completions)
-┌──────────────────────▼───────────────────────────────────────┐
-│                    OpenClaw Gateway                            │
-│                                                               │
-│   Agent orchestration:                                        │
-│   • Model routing (primary + fallbacks)                       │
-│   • Tool execution (web search, calendars, APIs)              │
-│   • Memory and session management                             │
-│   • Agent persona and system prompts                          │
-│   • Subagent delegation (Tier 1 → Tier 2 async gate)         │
-│                                                               │
-│   Optional: NemoClaw layer for security guardrails            │
-└──────────────────────┬───────────────────────────────────────┘
-                       │
-┌──────────────────────▼───────────────────────────────────────┐
-│                    LLM Backends                               │
-│                                                               │
-│   Local:  vLLM (primary, FP8, ~0.3s inference)               │
-│   Cloud:  Anthropic, NVIDIA NIM (fallback + research)         │
-│   Hybrid: local primary with cloud fallback                   │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                    Zello Work Network                        │
+│             (PTT radio — phones, desktops, radios)          │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ WebSocket
+                          │ Inbound: on_transcription (text)
+                          │ Outbound: Opus audio stream
+┌─────────────────────────▼───────────────────────────────────┐
+│                         ClawPTT                             │
+│                                                             │
+│  Inbound:  text from Zello (server-side STT)               │
+│  Outbound: sherpa-onnx TTS → Opus encode → Zello stream    │
+│                                                             │
+│  Also:                                                      │
+│  • Text sanitization (markdown → spoken word)               │
+│  • Conversation history (rolling buffer per channel)        │
+│  • Zello REST API (admin/data, port 18790)                  │
+│  • DM and channel support                                   │
+│                                                             │
+│  Does NOT handle: model selection, tools, search, persona   │
+└─────────────────────────┬───────────────────────────────────┘
+                          │ HTTP (OpenAI-compatible chat/completions)
+┌─────────────────────────▼───────────────────────────────────┐
+│                    OpenClaw Gateway                          │
+│                                                             │
+│  Agent orchestration:                                       │
+│  • Model routing (primary + fallbacks)                      │
+│  • Tool execution (web search, calendars, APIs)             │
+│  • Memory and session management                            │
+│  • Agent persona and system prompts                         │
+│  • Subagent delegation (Tier 1 → Tier 2 async gate)        │
+│                                                             │
+│  Optional: NemoClaw layer for security guardrails           │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────────┐
+│                       LLM Backends                          │
+│                                                             │
+│  Local:  vLLM (primary, FP8, ~0.3s inference)              │
+│  Cloud:  Anthropic, NVIDIA NIM (fallback + research)       │
+│  Hybrid: local primary with cloud fallback                  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-**Inbound flow:** Zello delivers transcription text via `on_transcription` WebSocket events (server-side STT). ClawPTT receives text directly — no Opus decoding needed on the inbound path. A local faster-whisper fallback exists (`STT_METHOD=faster-whisper`) for networks without Zello transcription enabled, but the default path is text-in, audio-out.
+**Inbound flow:** Zello delivers transcription text via `on_transcription` WebSocket events (server-side STT). ClawPTT receives text directly — no Opus decoding, no local STT model, no audio processing on the inbound path. Text in, audio out.
 
 ## Component Demarcation
 
@@ -431,9 +426,10 @@ The WebSocket streaming API supports joining up to **100 channels** per connecti
 
 | Component | Minimum | Recommended |
 |-----------|---------|-------------|
-| STT (faster-whisper) | CPU only, 2GB RAM | GPU, 4GB RAM |
 | TTS (sherpa-onnx) | CPU only, 512MB RAM | CPU is fine |
 | Local LLM (optional) | 16GB VRAM | 24GB+ VRAM |
+
+No local STT hardware needed — Zello handles speech-to-text server-side.
 
 ---
 
@@ -579,30 +575,30 @@ Voice has a hard constraint that text channels don't: **dead air is failure**. A
 The solution is a two-tier agent architecture:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                        Tier 1: Voice Agent                        │
-│                                                                    │
-│  Fast, lightweight, focused skillset                               │
-│  Model: local vLLM (sub-2s inference)                              │
-│  Skills: weather, calendar, email triage, search, locations        │
-│  Target: answer in 1-5 seconds                                     │
-│                                                                    │
-│  Can answer directly:              Must escalate:                  │
-│  "Weather in Barcelona?"           "Analyze the tax implications"  │
-│  "Where's Jack?"                   "Write a board memo"            │
-│  "Any SpaceX news?"                "Compare IPO scenarios"         │
-│  "What's on my calendar?"          "Send email to Luca"            │
-└─────────┬────────────────────────────────────────────────────────┘
-          │ gate triggers
-          ▼
-┌──────────────────────────────────────────────────────────────────┐
-│                     Tier 2: Research Agent                         │
-│                                                                    │
-│  Full skills, deep reasoning, no time constraint                   │
-│  Model: cloud Opus/Sonnet (frontier reasoning)                     │
-│  Skills: all (55+), including domain agents, write operations      │
-│  Runs async — posts results to text channel (Slack, WhatsApp, etc) │
-└──────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                   Tier 1: Voice Agent                        │
+│                                                             │
+│  Fast, lightweight, focused skillset                        │
+│  Model: local vLLM (sub-2s inference)                       │
+│  Skills: weather, calendar, email triage, search, locations │
+│  Target: answer in 1-5 seconds                              │
+│                                                             │
+│  Can answer directly:         Must escalate:                │
+│  "Weather in Barcelona?"      "Analyze the tax implications"│
+│  "Where's Jack?"              "Write a board memo"          │
+│  "Any SpaceX news?"           "Compare IPO scenarios"       │
+│  "What's on my calendar?"     "Send email to Luca"          │
+└────────────────────┬────────────────────────────────────────┘
+                     │ gate triggers
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   Tier 2: Research Agent                     │
+│                                                             │
+│  Full skills, deep reasoning, no time constraint            │
+│  Model: cloud Opus/Sonnet (frontier reasoning)              │
+│  Skills: all (55+), domain agents, write operations         │
+│  Runs async — posts results to text channel (Slack, etc.)   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Why this matters for any voice or chat system
@@ -760,26 +756,15 @@ The voice loop has a latency budget. Every second the user waits feels unnatural
 ```
 Target: < 10 seconds from PTT release to voice response start
 
-STT (faster-whisper base.en):     ~0.5s  (persistent worker, no model load)
-LLM (local vLLM):                 ~1-3s  (depends on response length)
-TTS (sherpa-onnx):                ~1-2s  (depends on text length)
-Audio encoding + transmission:     ~0.5s
-─────────────────────────────────────────
-Total:                             ~3-6s  typical
+Zello transcription delivery:      ~0s   (arrives with on_stream_stop)
+LLM (local vLLM):                  ~1-2s (depends on response length)
+TTS (sherpa-onnx):                 ~1-2s (depends on text length)
+Opus encoding + transmission:      ~0.5s
+──────────────────────────────────────────
+Total:                              ~3-5s typical
 ```
 
 With a cloud LLM, add 2-8 seconds. With tool calls (search), add 2-5 seconds per tool.
-
-### Whisper model selection
-
-| Model | Size | Speed | Accuracy | Recommended for |
-|-------|------|-------|----------|-----------------|
-| `base.en` | 74MB | Fastest | Good for clear speech | Default choice |
-| `small.en` | 244MB | Fast | Better with accents | Noisy environments |
-| `medium.en` | 769MB | Moderate | Very good | Multi-accent teams |
-| `large-v3` | 1.5GB | Slow | Best | Offline transcription (not real-time) |
-
-**Recommendation:** Start with `base.en`. Only upgrade if transcription quality is insufficient. The persistent worker eliminates model load time, so the difference is pure inference speed.
 
 ---
 
@@ -887,13 +872,13 @@ ClawPTT includes a built-in REST API for Zello Work admin and data operations. I
 When `ZELLO_API_KEY` is set, ClawPTT starts an HTTP server (default port 18790) alongside the voice bridge. Agents call it via standard HTTP — no MCP server, no extra processes.
 
 ```
-┌──────────────────────────────────────────────────┐
-│ ClawPTT (single process)                          │
-│                                                    │
-│  bridge.js ── Voice (WebSocket, Opus, STT/TTS)    │
-│  api.js ───── REST API (HTTP, port 18790)         │
-│  zello.js ─── ZelloAPI class (shared session)     │
-└──────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  ClawPTT (single process)                                   │
+│                                                             │
+│  bridge.js ─── Voice (text in via WS, TTS + Opus out)      │
+│  api.js ────── REST API (HTTP, port 18790)                  │
+│  zello.js ──── ZelloAPI class (shared session)              │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Endpoints
@@ -1042,10 +1027,9 @@ journalctl --user -u clawptt --since "1 hour ago" --priority err
 ### Capacity planning
 
 Each active voice conversation uses:
-- ~30MB RAM (Node.js process + Opus codec)
-- ~500MB RAM (faster-whisper worker with base.en model)
+- ~90MB RAM (Node.js process + Opus encoder)
 - ~200MB RAM (sherpa-onnx TTS, loaded per request)
 - Negligible CPU between conversations
-- Full STT/TTS CPU/GPU burst during processing
+- TTS CPU burst during response generation
 
 ClawPTT handles one conversation at a time per channel. Multiple channels are supported concurrently, but audio processing is sequential. For high-throughput deployments, run multiple ClawPTT instances on different channels.
