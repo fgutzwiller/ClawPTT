@@ -29,7 +29,7 @@ const ZELLO_WS_URL = `wss://zellowork.io/ws/${ZELLO_NETWORK}`;
 // ─── LLM Backend ──────────────────────────────────────────────────
 // "openclaw" → route through OpenClaw gateway (uses agent's configured model)
 // "local"    → direct OpenAI-compatible LLM call (vLLM/Ollama/etc)
-const LLM_BACKEND = process.env.LLM_BACKEND || "local";
+const LLM_BACKEND = process.env.LLM_BACKEND || "openclaw";
 
 // ─── OpenClaw Gateway (for "openclaw" backend) ────────────────────
 const OPENCLAW_GATEWAY = process.env.OPENCLAW_GATEWAY || "http://127.0.0.1:18789";
@@ -51,17 +51,16 @@ const AGENT_SYSTEM_PROMPT = process.env.AGENT_SYSTEM_PROMPT ||
 const STT_METHOD = process.env.STT_METHOD || "faster-whisper"; // "faster-whisper" or "zello-transcription"
 const WHISPER_MODEL = process.env.WHISPER_MODEL || "base.en";
 
-// TTS config — sherpa-onnx via Python (same venv)
-// Set TTS_VOICE to change voice, e.g. "en_GB-alan-medium", "en_US-lessac-high", "en_US-hfc_male-medium"
-const SHERPA_ONNX_DIR = process.env.SHERPA_ONNX_DIR || `${process.env.HOME}/.openclaw/tools/sherpa-onnx-tts`;
-const TTS_VOICE = process.env.TTS_VOICE || "en_GB-alan-medium";
+// TTS config — Piper voices via sherpa-onnx Python package
+const SHERPA_ONNX_DIR = process.env.SHERPA_ONNX_DIR || `${process.env.HOME}/.pinchptt/tts`;
+const TTS_VOICE = process.env.TTS_VOICE || "en_US-lessac-high";
 const TTS_VOICE_DIR = `${SHERPA_ONNX_DIR}/models/vits-piper-${TTS_VOICE}`;
 const TTS_MODEL = process.env.TTS_MODEL || `${TTS_VOICE_DIR}/${TTS_VOICE}.onnx`;
 const TTS_TOKENS = process.env.TTS_TOKENS || `${TTS_VOICE_DIR}/tokens.txt`;
 const TTS_DATA_DIR = process.env.TTS_DATA_DIR || `${TTS_VOICE_DIR}/espeak-ng-data`;
 
-// Python venv (shared for whisper + sherpa-onnx TTS)
-const VENV_PYTHON = process.env.VENV_PYTHON || `${process.env.HOME}/.openclaw/tools/whisper-env/bin/python3`;
+// Python binary — set VENV_PYTHON to point to a venv with faster-whisper + sherpa-onnx
+const VENV_PYTHON = process.env.VENV_PYTHON || "python3";
 
 // Opus settings for Zello: 16kHz mono, 60ms frames
 const SAMPLE_RATE = 16000;
@@ -261,14 +260,19 @@ function handleJsonFrame(raw) {
 
 // ─── Stream Lifecycle ─────────────────────────────────────────────
 function handleStreamStart(msg) {
-  const user = msg.from || msg.user;
+  // In channels: from=sender, channel=channel name
+  // In DMs: from is absent, contactName=sender, channel=bot's own name
+  const isDM = !msg.from && msg.contactName;
+  const user = msg.from || msg.contactName || msg.user;
+  const replyTo = isDM ? user : msg.channel; // DMs reply to sender, channels reply to channel
+
   // Don't process our own streams
   if (user === ZELLO_BOT_USER) return;
 
-  console.error(`[pinchptt] Stream start: ${user} on ${msg.channel} (stream ${msg.stream_id})`);
+  console.error(`[pinchptt] Stream start: ${user} on ${isDM ? "DM" : msg.channel} (stream ${msg.stream_id})`);
   activeStreams.set(msg.stream_id, {
     user: user,
-    channel: msg.channel,
+    channel: replyTo,
     codec: msg.codec,
     codecHeader: msg.codec_header,
     packetDuration: msg.packet_duration,
