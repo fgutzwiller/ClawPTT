@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/clawtalk-icon-white-clean.png" alt="ClawPTT" width="128">
+  <img src="assets/clawtalk-icon-white-clean.png" alt="ClawPTT" width="256">
 </p>
 
 # ClawPTT
