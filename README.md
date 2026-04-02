@@ -77,6 +77,10 @@ VENV_PYTHON=.venv/bin/python3
 
 See `.env.example` for all options (REST API, TTS voice, local LLM, conversation history).
 
+## Author
+
+Idea and execution with [Claude Code](https://claude.ai/claude-code): [Florian Gutzwiller](https://github.com/fgutzwiller)
+
 ## License
 
 MIT
