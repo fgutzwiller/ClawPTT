@@ -4,6 +4,42 @@
 
 # ClawPTT — Installation and Configuration Guide
 
+## Why ClawPTT Exists
+
+Push-to-talk radio is the fastest human-to-human communication protocol ever designed. One button, instant transmission, no dialing, no ringing, no "can you hear me." In field operations — military, emergency services, logistics, security — PTT is the standard because it's the only interface that works when your hands are full, your eyes are elsewhere, and you need an answer now.
+
+AI assistants today live behind screens. You type, you wait, you read. That's fine at a desk. It's useless on a radio net, in a vehicle, on a job site, or in any situation where voice is the only viable interface.
+
+ClawPTT bridges this gap. It puts an AI agent on a PTT radio channel. You key up, ask a question, release. The agent answers on the same channel, in spoken voice, in seconds. Everyone monitoring the channel hears both the question and the answer — shared situational awareness, the way radio is supposed to work.
+
+### Background
+
+This project comes from the intersection of three domains:
+
+**Amateur radio (HAM).** The radio operator's instinct is efficiency: minimum bandwidth, maximum information density, standardized protocols (Q-codes, prowords, PACE). ClawPTT borrows from this culture — responses are short, spoken in radio cadence, with clear acknowledgments ("Copy", "Negative", "Stand by"). No filler, no pleasantries, no markdown.
+
+**Tactical communications.** Military and security comms operate on the principle that the channel is shared, contested, and time-constrained. ClawPTT is designed with this in mind: the voice agent holds the channel only as long as necessary, gates complex queries to async text channels instead of blocking the radio, and follows a PACE-like fallback architecture (Primary: local vLLM → Alternate: cloud Sonnet → Contingency: manual → Emergency: offline).
+
+**Cybersecurity and infrastructure.** The system runs sovereign — local inference on your own hardware, no data leaving your network for routine queries. Cloud models are fallbacks, not defaults. The Zello REST API runs in-process (not as a separate service) to minimize attack surface. Credentials are never in config files, always in environment variables.
+
+### What ClawPTT actually does
+
+1. Someone keys up on Zello (phone, desktop, or hardware radio via gateway)
+2. Zello transcribes the speech server-side and delivers text to ClawPTT
+3. ClawPTT sends the text to an AI agent (local or cloud LLM via OpenClaw)
+4. The agent's response is converted to speech (offline TTS) and streamed back as Opus audio
+5. Everyone on the channel hears the answer
+
+Text in, audio out. The voice agent can check weather, pull calendar events, search the web, look up GPS locations, query databases — anything the agent has tools for. Complex questions that need deep research are gated: the voice agent responds immediately ("Routed to research. Check Slack.") and the heavy work runs asynchronously on a more capable model, posting results to a text channel.
+
+### Design principles
+
+- **Speed over completeness.** A 2-second partial answer beats a 30-second perfect one. On radio, silence is failure.
+- **Minimal skill surface.** The voice agent carries only the tools it needs (~10 skills). Everything else routes through a coordinator agent with full capabilities. Fewer skills = smaller prompt = faster inference.
+- **Async gate for deep work.** Questions requiring multi-step research, document drafting, or write operations are escalated to a research agent that runs asynchronously. The voice channel is never blocked.
+- **Sovereign inference.** Primary model runs locally (vLLM on GPU). Cloud is fallback only. Your voice data and agent responses stay on your infrastructure for routine operations.
+- **Channel-agnostic architecture.** The two-tier pattern (fast voice agent + async research agent) works for any transport: Zello PTT, WhatsApp voice, Discord, Telegram, phone calls. ClawPTT implements the Zello transport; the agent architecture is reusable.
+
 ## Table of Contents
 
 - [Architecture Overview](#architecture-overview)
@@ -13,7 +49,8 @@
 - [Agent Design for Voice](#agent-design-for-voice)
 - [Model Recommendations](#model-recommendations)
 - [Search and Tool Configuration](#search-and-tool-configuration)
-- [Gate Settings for Deep Research](#gate-settings-for-deep-research)
+- [Gate Settings and Execution Policy](#gate-settings-and-execution-policy)
+- [Zello Work REST API](#zello-work-rest-api)
 - [NemoClaw Integration](#nemoclaw-integration)
 - [Production Deployment](#production-deployment)
 
