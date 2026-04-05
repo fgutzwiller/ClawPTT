@@ -1,6 +1,6 @@
 {
   "name": "clawptt",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "ClawPTT - A push to talk interface to OpenClaw through Zello",
   "type": "module",
   "main": "index.js",
@@ -19,6 +19,8 @@
     "bridge.js",
     "api.js",
     "zello.js",
+    "stt-worker.py",
+    "tts-worker.py",
     "LICENSE",
     "README.md"
   ],

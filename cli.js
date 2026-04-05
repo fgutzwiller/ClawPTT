@@ -37,6 +37,7 @@ try {
 
 const channels = (process.env.ZELLO_BRIDGE_CHANNELS || "").split(",").filter(Boolean);
 const llmBackend = process.env.LLM_BACKEND || "openclaw";
+const sttMethod = process.env.STT_METHOD || "faster-whisper";
 
 const options = {
   zello: {
@@ -63,6 +64,10 @@ const options = {
     tokens: process.env.TTS_TOKENS,
     dataDir: process.env.TTS_DATA_DIR,
     python: process.env.VENV_PYTHON,
+  },
+  stt: {
+    method: sttMethod,
+    whisperModel: process.env.WHISPER_MODEL,
   },
   history: {
     maxTurns: process.env.HISTORY_MAX_TURNS ? parseInt(process.env.HISTORY_MAX_TURNS, 10) : undefined,
@@ -92,8 +97,8 @@ console.error(`  Network:  ${process.env.ZELLO_NETWORK || "(not set)"}`);
 console.error(`  Bot user: ${options.zello.botUser || "(not set)"}`);
 console.error(`  Channels: ${channels.join(", ") || "(none)"}`);
 console.error(`  LLM:      ${llmLabel}`);
-console.error(`  STT:      Zello server-side transcription`);
-console.error(`  TTS:      ${options.tts.voice || "en_US-lessac-high"}`);
+console.error(`  STT:      ${sttMethod}`);
+console.error(`  TTS:      ${options.tts.voice || "en_US-lessac-high"} (persistent worker)`);
 console.error("═══════════════════════════════════════════════════");
 
 // ─── Preflight checks ────────────────────────────────────────────
@@ -114,9 +119,7 @@ async function preflight() {
       });
       const contentType = res.headers.get("content-type") || "";
       if (contentType.includes("text/html")) {
-        // Gateway is running but HTTP API not enabled (dashboard returned)
         console.error(`[preflight] Gateway reachable but HTTP API returned HTML.`);
-        console.error("[preflight] The gateway may need its HTTP/OpenAI API enabled.");
         console.error("[preflight] ClawPTT will attempt to use it at runtime — continuing.");
       } else if (res.ok) {
         const data = await res.json();
@@ -139,7 +142,6 @@ async function preflight() {
         console.error("[preflight] Is openclaw-gateway running?");
         ok = false;
       } else {
-        // Gateway is reachable but response wasn't JSON (e.g. HTML dashboard)
         console.error(`[preflight] Gateway reachable but didn't return JSON — HTTP API may not be enabled.`);
         console.error("[preflight] ClawPTT will attempt to use it at runtime — continuing.");
       }
@@ -173,13 +175,15 @@ async function preflight() {
     console.error("[preflight] Fix: pip install sherpa-onnx numpy, or set VENV_PYTHON");
   }
 
-  // Check ffmpeg
-  try {
-    execSync("ffmpeg -version", { stdio: "pipe" });
-    console.error("[preflight] ffmpeg OK");
-  } catch {
-    console.error("[preflight] FAIL: ffmpeg not found. Audio encoding requires ffmpeg.");
-    ok = false;
+  // Check STT python + faster-whisper (only if using local STT)
+  if (sttMethod === "faster-whisper") {
+    try {
+      execSync(`${python} -c "import faster_whisper"`, { stdio: "pipe" });
+      console.error("[preflight] STT (faster-whisper) OK");
+    } catch {
+      console.error(`[preflight] Warning: faster-whisper not available via '${python}'. STT will fail.`);
+      console.error(`[preflight] Fix: ${python} -m pip install faster-whisper`);
+    }
   }
 
   if (!ok) {
